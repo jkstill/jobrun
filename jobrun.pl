@@ -9,7 +9,8 @@ use POSIX qw( ENOTCONN ECONNREFUSED ECONNRESET EINPROGRESS EWOULDBLOCK EAGAIN WN
 
 my $debug=0;
 my $NOTDONE=1;
-my $glue = 'jobrun';
+my $jobPidsSHMKey = 'jobpid';
+my $jobStatusSHMKey = 'jobstatus';
 my %jobsToRun=();
 my %jobs=();
 my %config=();
@@ -25,8 +26,10 @@ my %shmOptions = (
 );
 
 my %jobPids=();
+my %jobStatus=();
 
-tie %jobPids, 'IPC::Shareable', $glue, { %shmOptions } or die "tie failed - $!\n";
+tie %jobPids, 'IPC::Shareable', $jobPidsSHMKey, { %shmOptions } or die "tie failed - $!\n";
+tie %jobStatus, 'IPC::Shareable', $jobStatusSHMKey, { %shmOptions } or die "tie failed - $!\n";
 
 my $jobFile='jobs.conf';
 -r $jobFile || die "could not read $jobFile - $!\n";
@@ -50,6 +53,7 @@ children update the status
 0: child finished with error
 1: child finished successfully
 2: running - status has not updated by child - check if still running
+3: failed to run
 
 %jobs = (
 	pid => {
@@ -83,10 +87,10 @@ example:
 
 =cut
 
-print Dumper(\%jobsToRun) if $debug;
-
+print Dumper(\%jobsToRun); # if $debug;
 
 my @keys = keys %jobsToRun;
+#my @jobsRunning=();
 
 while ($NOTDONE) {
 
@@ -94,20 +98,43 @@ while ($NOTDONE) {
 	foreach (my $i=0;$i< $config{maxjobs};$i++) {
 		last unless $#keys >= 0 ;
 
+		my @jobsRunning = keys %jobPids;
+		if ( $#jobsRunning > $config{maxjobs} ) {
+			last;
+		}
+
 		print '@keys: ' . Dumper(\@keys) ; #if $debug;
 		print "\$#keys $#keys\n" if $debug;
 		print "i: $i\n" if $debug;
 		#last unless ($#keys + 1) < $config{maxjobs};
+		#
+		# check for number of jobs running here;
 
 		print "Starting job $keys[0]\n"; # always zero due to shift later
 		my $childPID = child($keys[0],"$jobsToRun{$keys[0]}");
 		print "main-parent-child PID: $childPID\n";
-		#$jobs{$childPID}->{name} = $jobsToRun{$keys[$i]}->{name};
+		$jobs{$childPID}->{name} = $keys[0];
+		$jobs{$childPID}->{cmd} = $jobsToRun{$keys[0]};
 		#$jobs{$childPID}->{status} = 2;
-		#$jobs{$childPID}->{cmd} = $jobsToRun{$keys[$i]}->{cmd};
 		shift @keys;
 
 
+	}
+
+	# cleanup jobs that have finished
+	foreach my $jobID ( keys %jobPids ) {
+		my $childPid = $jobPids{$jobID};
+		my $pidResult = waitpid( $childPid, WNOHANG);
+
+		if ( $pidResult == -1 ) {
+			delete $jobPids{$jobID};
+			delete $jobStatus{$jobID};
+		} elsif ( $pidResult == $childPid ) {
+			# still running
+		} else {
+			warn "childPid - $childPid: unknown return value: $pidResult\n";
+		}
+		
 	}
 
 	$NOTDONE = 0 unless $#keys >= 0 ;
@@ -116,8 +143,9 @@ while ($NOTDONE) {
 	sleep $config{'iteration-seconds'};
 }
 
-print '%jobPids" ' . Dumper(\%jobPids);
-print Dumper(\%jobsToRun) if $debug;
+print '%jobPids: ' . Dumper(\%jobPids);
+print '%jobStatus ' . Dumper(\%jobStatus);
+print '%jobs: ' . Dumper(\%jobs) ; #if $debug;
 exit;
 
 
@@ -131,18 +159,34 @@ sub child {
 	if ($child) {
 		print "child - parent: pid: $child  name: $jobID  cmd: $cmd\n";
 		#delete $jobs{$child} if exists $jobs{$child};
-		#$jobs{$child}->{name} = $jobID;	
-		#$jobs{$child}->{cmd} = $cmd;	
+		$jobs{$child}->{name} = $jobID;	
+		$jobs{$child}->{cmd} = $cmd;	
 	} else {
 		$child = fork();	
 		# use system() here
 		#qx/$cmd/;
-		$jobPids{$jobID} = $$;
+		my $pid=$$;
+		$jobPids{$jobID} = $pid;
+		$jobStatus{$jobID} = 2; # running
+		#push @jobsRunning, $pid;
 		system($cmd);
 		#waitpid(-1, WNOHANG);
-		my $error = $?;
+		my $rc = $?;
 
-		print "error:cmd: $error - $cmd\n";
+		if ( $? == -1) {
+			# failed to execute
+			$jobStatus{$jobID} = 3; # error
+			;
+		} elsif ( $? & 127) {
+			$jobStatus{$jobID} = 0; # error
+		} else {
+			;
+			$jobStatus{$jobID} = 1; # success
+		}
+
+		#delete $jobPids{$jobID};
+		#delete $jobStatus{$jobID};
+		print "rc $rc - $cmd\n";
 
 		exit 0;
 
