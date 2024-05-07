@@ -87,60 +87,62 @@ example:
 
 =cut
 
-print Dumper(\%jobsToRun); # if $debug;
+print Dumper(\%jobsToRun) if $debug;
 
-my @keys = keys %jobsToRun;
+my @jobNames = keys %jobsToRun;
 #my @jobsRunning=();
+#
+
+print '@jobNames: ' . Dumper(\@jobNames);
+print '%jobsToRun ' . Dumper(\%jobsToRun);
+#exit;
 
 while ($NOTDONE) {
 
 
 	foreach (my $i=0;$i< $config{maxjobs};$i++) {
-		last unless $#keys >= 0 ;
+		last unless $#jobNames >= 0 ;
 
 		my @jobsRunning = keys %jobPids;
 		if ( $#jobsRunning > $config{maxjobs} ) {
 			last;
 		}
 
-		print '@keys: ' . Dumper(\@keys) ; #if $debug;
-		print "\$#keys $#keys\n" if $debug;
+		print '@jobNames ' . Dumper(\@jobNames) if $debug;
+		print "\$#jobNames $#jobNames\n" if $debug;
 		print "i: $i\n" if $debug;
-		#last unless ($#keys + 1) < $config{maxjobs};
+		#last unless ($#jobNames + 1) < $config{maxjobs};
 		#
 		# check for number of jobs running here;
 
-		print "Starting job $keys[0]\n"; # always zero due to shift later
-		my $childPID = child($keys[0],"$jobsToRun{$keys[0]}");
+		print "Starting job $jobNames[0]\n"; # always zero due to shift later
+		# spawn
+		my $childPID = child($jobNames[0],"$jobsToRun{$jobNames[0]}");
 		print "main-parent-child PID: $childPID\n";
-		$jobs{$childPID}->{name} = $keys[0];
-		$jobs{$childPID}->{cmd} = $jobsToRun{$keys[0]};
+		#$jobs{$childPID}->{name} = $jobNames[0];
+		#$jobs{$childPID}->{cmd} = $jobsToRun{$jobNames[0]};
+		$jobs{$jobNames[0]}->{pid} = $childPID;
+		$jobs{$jobNames[0]}->{cmd} = $jobsToRun{$jobNames[0]};
+		$jobs{$jobNames[0]}->{status} = 2;
 		#$jobs{$childPID}->{status} = 2;
-		shift @keys;
-
+		shift @jobNames;
 
 	}
 
 	# cleanup jobs that have finished
-	foreach my $jobID ( keys %jobPids ) {
-		my $childPid = $jobPids{$jobID};
-		my $pidResult = waitpid( $childPid, WNOHANG);
+	jobCleanup(0);
 
-		if ( $pidResult == -1 ) {
-			delete $jobPids{$jobID};
-			delete $jobStatus{$jobID};
-		} elsif ( $pidResult == $childPid ) {
-			# still running
-		} else {
-			warn "childPid - $childPid: unknown return value: $pidResult\n";
-		}
-		
-	}
-
-	$NOTDONE = 0 unless $#keys >= 0 ;
+	$NOTDONE = 0 unless $#jobNames >= 0 ;
 
 	print "main sleeping...\n";
 	sleep $config{'iteration-seconds'};
+}
+
+jobCleanup(1);
+
+# update the status values in %jobs
+foreach my $jobName ( keys %jobStatus ) {
+	$jobs{$jobName}->{status} = $jobStatus{$jobName};
 }
 
 print '%jobPids: ' . Dumper(\%jobPids);
@@ -149,50 +151,90 @@ print '%jobs: ' . Dumper(\%jobs) ; #if $debug;
 exit;
 
 
+# the job hashes/arrays are all global
+sub jobCleanup {
+	my ($cleanupAll) = @_;
+	my $kid;
+	while (1) {
+
+		# wait for any grandchild to complete
+		$kid = waitpid(-1,WNOHANG);
+		print "jobCleanup - kid: $kid\n" if $debug;
+
+		# exit the loop if there is space to create a new process
+		# child() is removing entries form jobPids as the the process completes
+		# keep in mind that %jobPids and %jobStatus are in shared memory
+		my @pidCount = keys %jobPids;	
+		last if $#pidCount < 0;
+
+		#print "jobCleanup: pidCount: $#pidCount\n"; # if $debug;
+		#print "jobCleanup: cleanupAll: $cleanupAll - " . Dumper(\%jobPids); # if $debug;
+
+		unless ( $cleanupAll ) {
+			if ( $#pidCount < ($config{maxjobs} + 1) ) {
+				last;
+			}
+		}
+
+		sleep 0.10;
+
+	} # while ($kid > 0);
+
+	return;	
+}
+
 sub child {
 	my ($jobID, $cmd) = @_;
 
 	my $child = fork();
 	#die("Can't fork: $!") unless defined ($child = fork());
-	die("Can't fork: $!") unless defined($child);
+	die("Can't fork #1: $!") unless defined($child);
 
 	if ($child) {
-		print "child - parent: pid: $child  name: $jobID  cmd: $cmd\n";
+		print "child - parent: name: $jobID  cmd: $cmd\n";
 		#delete $jobs{$child} if exists $jobs{$child};
-		$jobs{$child}->{name} = $jobID;	
-		$jobs{$child}->{cmd} = $cmd;	
+		#$jobs{$child}->{name} = $jobID;	
+		#$jobs{$child}->{cmd} = $cmd;	
 	} else {
+
 		$child = fork();	
-		# use system() here
-		#qx/$cmd/;
-		my $pid=$$;
-		$jobPids{$jobID} = $pid;
-		$jobStatus{$jobID} = 2; # running
-		#push @jobsRunning, $pid;
-		system($cmd);
-		#waitpid(-1, WNOHANG);
-		my $rc = $?;
+		die("Can't fork #2: $!") unless defined($child);
 
-		if ( $? == -1) {
-			# failed to execute
-			$jobStatus{$jobID} = 3; # error
-			;
-		} elsif ( $? & 127) {
-			$jobStatus{$jobID} = 0; # error
+		if ($child == 0 ) {
+			# use system() here
+			#qx/$cmd/;
+			my $pid=$$;
+			$jobPids{$jobID} = $pid;
+			$jobStatus{$jobID} = 2; # running
+			#push @jobsRunning, $pid;
+			system($cmd);
+	
+			my $rc = $?;
+	
+			if ( $? == -1) {
+				# failed to execute
+				$jobStatus{$jobID} = 3; # error
+				;
+			} elsif ( $? & 127) {
+				$jobStatus{$jobID} = 0; # error
+			} else {
+				;
+				$jobStatus{$jobID} = 1; # success
+			}
+	
+			delete $jobPids{$jobID};
+			#delete $jobStatus{$jobID};
+			print "rc $rc - $cmd\n";
+	
+			# at this time always exit with success
+			# success/fail status is tracked in %jobStatus
+			exit 0;
 		} else {
-			;
-			$jobStatus{$jobID} = 1; # success
+			exit;
 		}
-
-		#delete $jobPids{$jobID};
-		#delete $jobStatus{$jobID};
-		print "rc $rc - $cmd\n";
-
-		exit 0;
 
 	};
 
-	waitpid($child,0);
 	return $child;
 }
 
