@@ -5,7 +5,11 @@ use strict;
 use Data::Dumper;
 use IPC::Shareable;
 use POSIX qw( ENOTCONN ECONNREFUSED ECONNRESET EINPROGRESS EWOULDBLOCK EAGAIN WNOHANG );
+use IO::File;
 
+my $logFile='jobrun-debug.log';
+my $logFileFH = IO::File->new($logFile,'w') or die "cannot open $logFile for write - $!\n";;
+$logFileFH->print("==============================================================\n");
 
 my $debug=0;
 my $NOTDONE=1;
@@ -15,6 +19,7 @@ my $jobStatusSHMKey = 'jobstatus';
 my %jobsToRun=();
 my %jobs=();
 my %config=();
+my $usePidCheckFailsafe=0;
 
 my $configFile='jobrun.conf';
 -r $configFile || die "could not read $configFile - $!\n";
@@ -41,7 +46,7 @@ $SIG{HUP} = sub {getKV($configFile,\%config)}; # kill -1 - reload config
 $SIG{INT} = sub { $NOTDONE=0; }; # kill -2
 $SIG{QUIT} = sub { $NOTDONE=0; }; # kill -3
 $SIG{TERM} = sub { $NOTDONE=0; }; # kill -15 - use this, as -3 and -2 will not work on children that are running system()
-$SIG{USR1} = sub { $debug=1; }; 
+$SIG{USR1} = sub { $debug=1; $usePidCheckFailsafe=1; }; 
 
 getKV($configFile,\%config);
 getKV($jobFile,\%jobsToRun);
@@ -151,6 +156,20 @@ foreach my $jobName ( keys %jobChildPids ) {
 	$jobs{$jobName}->{pid} = $jobChildPids{$jobName};
 }
 
+if ($usePidCheckFailsafe) {
+	$logFileFH->print('%jobPids: ' . Dumper(\%jobPids));
+	$logFileFH->print('%jobStatus ' . Dumper(\%jobStatus));
+	$logFileFH->print('%jobs: ' . Dumper(\%jobs));
+	$logFileFH->close();
+	# laziness
+	my $timeStamp = `date '+%Y-%m-%d_%H-%M-%S'`;
+
+	system("cp jobrun-debug.log logs/jobrun-debug-$timeStamp.log")
+
+	#print "save a copy of jobrun-debug.log\n";
+	#print "Press ENTER to continue\n";
+	#my $dummy = <STDIN>;
+}
 
 print '%jobPids: ' . Dumper(\%jobPids);
 print '%jobStatus ' . Dumper(\%jobStatus);
@@ -168,6 +187,8 @@ sub jobCleanup {
 	# if not then remove from jobPids and set jobStatus 
 	my $failSafeCurrent = 0;
 	my $failSafeMax = 40;
+
+	#syntax error;
 
 	while (1) {
 
@@ -196,26 +217,38 @@ sub jobCleanup {
 		# occasionally 1 job is left in jobpids, but there is no such process
 		# need to have something other than 'sleep N' as the job so some logging can be done.
 		# for now, clean up and set status to 4 - unknown failure
-		if ($failSafeCurrent++ >= $failSafeMax) {
+		if ($failSafeCurrent++ >= $failSafeMax && $usePidCheckFailsafe) {
 
 			$failSafeCurrent = 0;
 
 			my @jobIDs = keys %jobPids;
 
-=head1
+			#=head1
+
+			$logFileFH->print("--------- failsafe ------------\n");
 
 			foreach my $jobID ( @jobIDs ) {
 				my $pid = $jobPids{$jobID};
 				print "==>> pidcheck: $pid\n";
 				my $kid = waitpid($pid,WNOHANG);
 				print "==>> kidcheck: $kid\n";
+
+				$logFileFH->print("pidcheck: $pid\n");
+				$logFileFH->print("kidcheck: $kid\n");
+
 				if ($kid == -1 ) {
+					$logFileFH->print("deleting $jobID - \$jobPids{\$jobID} \n");
+					my $ps = `ps -fp $pid`;
+					$logFileFH->print("ps:\n$ps\n");
+					$logFileFH->print("current status before change to 4: jobStatus{$jobID}\n");
 					delete $jobPids{$jobID};
 					$jobStatus{$jobID} = 4;
 				}
 			}
 
-=cut
+			$logFileFH->print("-------------------------------\n");
+
+			#=cut
 
 		}
 
@@ -246,6 +279,14 @@ sub child {
 			#$0 = $jobID;
 			print "grandChild jobID: $jobID\n";
 			print "grandChild PID: $pid\n";
+
+			my $ps = `ps -fp $pid`;
+
+			$logFileFH->print("grandChild obID: $jobID  PID: $pid\n");
+			$logFileFH->print("grandChild ps:\n $ps\n");
+			$logFileFH->print("==============================================================\n");
+
+
 
 			$jobChildPids{$jobID} = $pid;
 			$jobPids{$jobID} = $pid;
