@@ -108,14 +108,20 @@ print '%jobsToRun ' . Dumper(\%jobsToRun);
 #exit;
 print "Parent PID: $$\n";
 
-while ($NOTDONE) {
+#whatnot
 
+
+while ($NOTDONE) {
 
 	foreach (my $i=0;$i< $config{maxjobs};$i++) {
 		last unless $#jobNames >= 0 ;
 
 		my @jobsRunning = keys %jobPids;
-		if ( $#jobsRunning > $config{maxjobs} ) {
+		my $j = scalar($#jobsRunning);
+		$j++;
+		if ( ($j) >= $config{maxjobs} ) {
+			print "main Throttling:\n";
+			print "jobsRunning: $j  maxjobs: $config{maxjobs}\n";
 			last;
 		}
 
@@ -306,11 +312,26 @@ sub child {
 				;
 				$jobStatus{$jobID} = 1; # success
 			}
-	
-			delete $jobPids{$jobID};
-			#delete $jobStatus{$jobID};
-			print "rc $rc - $cmd\n";
-	
+
+			my $failsafe=10;
+			my $failsafeCount=1;
+			while (exists($jobPids{$jobID})) {
+
+				if ($failsafeCount++ > 1 ) { 
+					print "job $jobID spinning out of control trying to delete \$jobPid{\$jobID} - iteration $failsafeCount\n";
+					sleep 0.25;
+				} 
+
+				if ($failsafeCount >= 10) {
+					print "job $jobID bailing out - cannot delete \$jobPid{\$jobID}\n";
+					die;
+				}
+
+				delete $jobPids{$jobID};
+				#delete $jobStatus{$jobID};
+				print "rc $rc - $cmd\n";
+			}
+
 			# at this time always exit with success
 			# success/fail status is tracked in %jobStatus
 			exit 0;
