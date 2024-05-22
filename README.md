@@ -85,6 +85,63 @@ These values are already set in the jobs.conf file, so send HUP to cause the con
 $  kill -1 $(cat jobrun.pid)
 ```
 
+## Help
+
+```text
+  ./jobrun.pl -h
+jobrun.pl
+
+
+usage: jobrun.pl
+
+
+  The default values are found in jobrun.conf, and can be changed.
+
+  --config-file        jobrun config file. default: jobrun.conf
+  --job-config-file    jobs config file. default: jobs.conf
+  --iteration-seconds  seconds between checks to run more jobs. default: 10
+  --maxjobs            number of jobs to run concurrently. default: 9
+  --logfile            logfile basename. default: jobrun-sem
+  --logfile-suffix     logfile suffix. default: log
+  --verbose            print more messages: default: 1 or on
+  --debug              print debug messages: default: 1 or on
+  --help               show this help.
+
+Example:
+
+  ./jobrun.pl --logfile-suffix=load-log --job-config-file dbjobs.conf --maxjobs 1 --nodebug --noverbose
+
+
+ When jobrun.pl starts, it will create a file 'jobrun.pid' in the current directory.
+
+ There are traps on the HUP, INT, TERM and QUIT signals.
+
+ Pressing CTL-C will not stop jobrun, but it will print a status message.
+
+ Pressing CTL-\ will kill the program and cleanup semaphores
+
+ The config file can be reloaded with HUB.
+
+ Say you have started jobrun with the --noverbose and --nodebug flags, but would now like to change
+ that so that more info appears on screen.
+
+ The following command will do that:
+
+ $ kill -1 $(cat jobrun.pid)
+
+ jobrun can also be stopped with QUIT or TERM (see kill -l)
+
+ QUIT
+ $ kill -3 $(cat jobrun.pid)
+
+ TERM
+ $ kill -15 $(cat jobrun.pid)
+
+
+ It may take a few moments for the chilren to die.
+
+ The fastest method to stop jobrun is CTL-\
+```
 
 ### Things to implement
 
