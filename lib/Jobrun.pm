@@ -1,6 +1,6 @@
 #
 # Jared Still
-# 2024-05-19
+# 2024-05-21
 # jkstill@gmail.com
 #
 # use to fork a process to run a job
@@ -19,7 +19,7 @@ package Jobrun;
 use warnings;
 use strict;
 use IPC::Semaphore;
-use IPC::SysV qw(SEM_UNDO IPC_CREAT S_IRUSR S_IWUSR);
+use IPC::SysV qw(IPC_PRIVATE SEM_UNDO IPC_CREAT S_IRUSR S_IWUSR);
 use Data::Dumper;
 use File::Temp qw/ :seekable tmpnam/;
 #use Time::HiRes qw( usleep );
@@ -52,7 +52,7 @@ use constant {
 
 
 # Create semaphores
-my $sem_key = 'JOBRUN'; # Private key for IPC
+my $sem_key = IPC_PRIVATE; # Private key for IPC
 my $sem = IPC::Semaphore->new($sem_key, 2, S_IRUSR | S_IWUSR | IPC_CREAT) or die "Unable to create semaphore: $!";
 
 # Initialize semaphore values
@@ -119,18 +119,30 @@ sub cleanup {
     $sem->remove();
 }
 
+sub status {
+	$SIG{'INT'} = 'IGNORE';
+	print "=== STATUS ===\n";
+	foreach my $key ( sort keys %jobPids ) {
+		print "job: $key status: $jobPids{$key}\n";
+	}
+	print "====================================\n";
+	sleep 1;
+	$SIG{'INT'} = \&Jobrun::status;
+	return;
+}
+
 sub child {
 	my $self = shift;
 	my ($jobName,$cmd) = @_;
 
-	print 'SELF: ' . Dumper($self);
+	#print 'SELF: ' . Dumper($self);
 
 	my $child = fork();
 	#die("Can't fork: $!") unless defined ($child = fork());
 	die("Can't fork #1: $!") unless defined($child);
 
 	if ($child) {
-		$self->{LOGGER}( "child - parent: name: $self->{CMD}\n");
+		$self->{LOGGER}( "child:$$  cmd:$self->{CMD}\n");
 
 	} else {
 
@@ -141,15 +153,16 @@ sub child {
 			# use system() here
 			#qx/$cmd/;
 			my $pid=$$;
-			$jobPids{$self->{JOBNAME}} = $pid;
+			$jobPids{$self->{JOBNAME}} = "$pid:running";
 
-			$self->{LOGGER}( "grandChild PID: $pid\n");
+			$self->{LOGGER}( "grandChild:$pid:running\n");
 			#
-			$self->{LOGGER} ( "grancChild $pid running job $self->{JOBNAME}\n");
+			$self->{LOGGER} ( "grancChild:$pid running job $self->{JOBNAME}\n");
 			system($self->{CMD});
 			my $rc = $?;
 	
 			decrementChildren();
+			$jobPids{$self->{JOBNAME}} = "$pid:complete";
 			exit $rc;
 		} else {
 			exit 0;
@@ -160,6 +173,5 @@ sub child {
 	waitpid($child,0);
 	return;
 }
-
 
 
