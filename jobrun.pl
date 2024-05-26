@@ -58,7 +58,10 @@ GetOptions(
 	\%optctl,
 	"config-file=s" => \$configFile,
 	"job-config-file=s" => \$jobFile ,
+	"help!" => \$help
 );
+
+usage(0) if $help;
 
 -r $configFile || die "could not read $configFile - $!\n";
 -r $jobFile || die "could not read $jobFile - $!\n";
@@ -80,7 +83,6 @@ GetOptions(
 	"kill!"  => \$exitNow,
 	"z!" => \$help,
 	"h!" => \$help,
-	"help!" => \$help
 )  or  usage(1);
 
 
@@ -90,7 +92,6 @@ GetOptions(
 usage(1) if $#ARGV > -1;
 #exit;
 
-usage(0) if $help;
 
 # trapping signals to run the status and reload config causes the 
 # main script to add more jobs
