@@ -117,18 +117,21 @@ sub cleanup {
     $sem->setval(SEM_LOCK, 1);
     unlock();
     $sem->remove();
+	 undef %jobPids;
+	 return;
 }
 
 sub status {
-	$SIG{'INT'} = 'IGNORE';
 	print "=== STATUS ===\n";
 	foreach my $key ( sort keys %jobPids ) {
 		print "job: $key status: $jobPids{$key}\n";
 	}
 	print "====================================\n";
-	sleep 1;
-	$SIG{'INT'} = \&Jobrun::status;
 	return;
+}
+
+sub getJobPids {
+	return \%jobPids;
 }
 
 sub child {

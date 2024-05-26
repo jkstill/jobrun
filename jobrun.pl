@@ -22,10 +22,17 @@ use Data::Dumper;
 use Getopt::Long qw(:config pass_through) ;
 use lib './lib';
 use Jobrun;
+use sigtrap 'handler', sub{ cleanup(); exit; }, qw(QUIT TERM);
 
-use Fcntl qw(:flock);
-open our $file, '<', $0 or die $!;
-flock $file, LOCK_EX|LOCK_NB or die "Only 1 jobrun can be executing in the current dirctory-$!\n";
+# seem comments later about using signals to run code
+# does not seem to work in a useful manner
+# I think what happens is the current call gets interrupted by the signal,
+# and the return is to whatever the following line of code is.
+#use sigtrap 'handler', \&reloadConfig, qw(USR1); ## kill -10
+#use sigtrap 'handler', \&Jobrun::status, qw(USR2); ## kill -12
+
+ # CTL-C will not work - use CTL-\
+$SIG{'INT'} = 'IGNORE'; 
 
 my @programPath = split(/\//,$0);
 my $programName = $programPath[$#programPath];
@@ -35,7 +42,6 @@ print "$programName\n";
 my $configFile='jobrun.conf';
 my $jobFile='jobs.conf';
 
-
 my %jobsToRun=();
 my %jobs=();
 my %config=();
@@ -44,7 +50,9 @@ my $debug=0;
 my %optctl;
 my $help=0;
 my $maxjobs=0;
-
+my $exitNow=0;
+my $reloadConfigFile=0;
+my $getStatus=0;
 
 GetOptions(
 	\%optctl,
@@ -58,6 +66,8 @@ GetOptions(
 getKV($configFile,\%config);
 getKV($jobFile,\%jobsToRun);
 
+#"reload-config!" => \$reloadConfigFile,
+
 GetOptions(
 \%optctl,
 	"iteration-seconds=i",
@@ -65,7 +75,9 @@ GetOptions(
 	"logfile=s",
 	"logfile-suffix=s",
 	"verbose!" => \$verbose,
+	"status!" => \$getStatus,
 	"debug!" => \$debug,
+	"kill!"  => \$exitNow,
 	"z!" => \$help,
 	"h!" => \$help,
 	"help!" => \$help
@@ -75,12 +87,48 @@ GetOptions(
 # manual check for unknown arguments due to use of pass_through
 #print '@ARGV ' . Dumper(\@ARGV);
 #print "#ARGV: $#ARGV\n";
-
 usage(1) if $#ARGV > -1;
-
 #exit;
 
 usage(0) if $help;
+
+# trapping signals to run the status and reload config causes the 
+# main script to add more jobs
+# same if just --status is passed
+# leave here for future use
+=head1 non-working code
+
+if ( $reloadConfigFile ) {
+	# send HUP to pid of main process
+	my $mainPID = getMainPid();
+	kill 'USR1', $mainPID;
+	exit 0;
+}
+
+=cut
+
+if ( $getStatus ) {
+	# send HUP to pid of main process
+	Jobrun::status();
+	exit 0;
+}
+
+
+if ( $exitNow ) {
+	# send HUP to pid of main process
+	my $mainPID = getMainPid();
+	my $childrenHash = Jobrun::getJobPids();
+	my @childPids = map { (split(/:/,$childrenHash->{$_}))[0] }  keys %{$childrenHash};
+	print 'ChildPIDs: ' . Dumper(\@childPids);
+	kill '-TERM', @childPids;
+	kill '-TERM', $mainPID;
+	unlink 'jobrun.pid';
+	exit 0;
+}
+
+use Fcntl qw(:flock);
+open our $file, '<', $0 or die $!;
+flock $file, LOCK_EX|LOCK_NB or die "Only 1 jobrun can be executing in the current dirctory-$!\n";
 
 createPidFile();
 
@@ -106,11 +154,6 @@ if ($debug) {
 	logger("parent:$$ " .  "concurrent jobs $numberJobsToRun\n");
 }
 
-
-$SIG{HUP} = \&reloadConfig;
-$SIG{INT} = \&Jobrun::status;
-$SIG{QUIT} = sub{ Jobrun::cleanup(); exit; };
-$SIG{TERM} = sub{ Jobrun::cleanup(); exit; };
 
 print "parent pid: $$\n:";
 #my $dummy=<STDIN>;
@@ -145,24 +188,40 @@ while(1) {
 	sleep $config{'iteration-seconds'};
 }
 
-# wait for jobs to finish
-while ( Jobrun::getChildrenCount() > 0 ) {
-	logger("parent:$$ " . "main: waiting for children to complete\n");
-	sleep $config{'iteration-seconds'};
-}
-
-Jobrun::cleanup(); # Note: This will remove the semaphore. Only call this when absolutely necessary.
-
+cleanup();
 exit;
 
 ########################################
 ## END OF MAIN
 ########################################
+#
+
+sub cleanup {
+	# wait for jobs to finish
+	while ( Jobrun::getChildrenCount() > 0 ) {
+		logger("parent:$$ " . "main: waiting for children to complete\n");
+		sleep $config{'iteration-seconds'};
+	}
+
+	Jobrun::cleanup(); # Note: This will remove the semaphore. Only call this when absolutely necessary.
+
+	if ( -w 'jobrun.pid' ) {
+		unlink 'jobrun.pid;'
+	}
+
+}
 
 sub createPidFile {
-	open PIDFILE, '>', 'jobrun.pid';
+	open PIDFILE, '>', 'jobrun.pid' or die "could not create jobrun.pid - $!\n";
 	print PIDFILE "$$";
 	close PIDFILE;
+}
+
+sub getMainPid {
+	open PIDFILE, '<', 'jobrun.pid' or die "could not read jobrun.pid - $!\n";
+	my $pid  = <PIDFILE>;
+	close PIDFILE;
+	return $pid;
 }
 
 sub getKV {
@@ -185,11 +244,15 @@ sub logger {
 		$logFileFH->print($line);
 		print "$line" if $config{verbose};
 	}
+	return;
 }
 
 sub reloadConfig {
+	#$SIG{'HUP'} = 'IGNORE';
 	logger("parent:$$ reloading \%config\n");
 	getKV($configFile,\%config);
+	#$SIG{HUP} = \&reloadConfig; # kill -1
+	return;
 }
 
 sub usage {
@@ -211,7 +274,10 @@ print q{
   --iteration-seconds  seconds between checks to run more jobs. default: 10
   --maxjobs            number of jobs to run concurrently. default: 9
   --logfile            logfile basename. default: jobrun-sem
+  --status             show status of currently running child jobs
+  --kill               kill the current child jobs and parent
   --logfile-suffix     logfile suffix. default: log
+  --reload-config      reload the config file
   --verbose            print more messages: default: 1 or on
   --debug              print debug messages: default: 1 or on
   --help               show this help.
@@ -229,7 +295,9 @@ Example:
 
  Pressing CTL-\ will kill the program and cleanup semaphores
 
- The config file can be reloaded with HUB.
+ The config file can be reloaded by sending the HUP signal to the current jobrun.pl parent process.
+
+ Or just run './jobrun.pl' --reload-config.
 
  Say you have started jobrun with the --noverbose and --nodebug flags, but would now like to change
  that so that more info appears on screen.
