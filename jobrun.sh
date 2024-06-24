@@ -13,6 +13,7 @@ fileName="$1"
 
 set -u
 
+declare PGID=$$
 
 declare -A runningJobs=()
 declare -A runningPIDS
@@ -22,6 +23,17 @@ declare intervalSeconds=3
 declare maxConcurrentJobs=5
 declare numberJobsRunning
 declare pidFileDir=pidfiles
+
+onTerm () {
+	echo
+	echo "TERM: Cleaning up"
+	ps -o pgid,pid,ppid,cmd | grep "^$PGID"
+	kill -KILL -- -$PGID
+	echo
+	exit
+}
+
+trap onTerm SIGV TERM INT
 
 fileIsReadable () {
 	if [[ -r "$1" ]]; then
@@ -34,6 +46,7 @@ fileIsReadable () {
 getTimestamp () {
 	date '+%Y-%m-%d %H:%M:%S'
 }
+
 # return array of key value pairs
 getKV () {
 	local arrayName="$1"
@@ -116,9 +129,13 @@ do
 		runningPIDS[$childPID]=$jobKey
 		mkdir -p $pidFileDir
 		ps -p $childPID -o pid,ppid,cmd > $pidFileDir/${childPID}.pid
-		unset ${jobsConf[$jobKey]}
+		unset jobsConf[$jobKey]
+		echo "Continuing"
+		continue
 
 	fi
+	
+	echo "Checking RunPIDS"
 
 	for runPID in ${!runningPIDS[@]} 
 	do
@@ -135,11 +152,11 @@ do
 		if [[ $RC -eq 0 ]]; then
 			echo "running PID Job: ${runningPIDS[$runPID]}"
 			declare currJob=${runningPIDS[$runPID]}
-			unset ${runningJobs[$currJob]}
-			echo "$timestamp - finished "  >> $pidFileDir/${runPID}.pid 
+			unset runningJobs[$currJob]
+			echo "$timestamp - still running "  >> $pidFileDir/${runPID}.pid 
 			(( numberJobsRunning-- ))
 		else
-			echo "$timestamp - still running "  >> $pidFileDir/${runPID}.pid 
+			echo "$timestamp - finished "  >> $pidFileDir/${runPID}.pid 
 		fi
 	done
 
@@ -151,6 +168,13 @@ do
 done
 
 wait
+
+echo "runningJobs:"
+showKV runningJobs
+
+echo "jobsConf:"
+showKV jobsConf
+
 
 
 
