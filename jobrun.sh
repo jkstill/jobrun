@@ -9,20 +9,6 @@ scriptHome=$(dirname -- "$( readlink -f -- "$0"; )")
 
 cd $scriptHome || { echo "could not cd $scriptHome"; exit 1; }
 
-logDir='logs';
-
-mkdir -p $logDir
-
-logFile=$logDir/jobrun-sh-$(date +%Y-%m-%d_%H-%M-%S).log
-
-# Redirect stdout ( > ) into a named pipe ( >() ) running "tee"
-# process substitution
-# clear/recreate the logfile
-> $logFile
-exec 1> >(tee -ia $logFile)
-tee01PID=$!
-exec 2> >(tee -ia $logFile >&2)
-tee02PID=$!
 
 help () {
 	echo
@@ -30,55 +16,62 @@ help () {
 	cat <<-EOF
 
 
+  -i  interval seconds - default 10
   -j  jobs config file - default jobs.conf
   -r  jobrun config file - default jobrun.conf
   -m  max concurrent jobs - default 5
+  -s  log directory  - default logs
+  -t  log file base name - default jobrun-sh
+  -u  log file suffix - default log
   -d  debug on
+  -n  debug off - overrides config file
+  -y  dry run - read arguments, config file, show variables and exit
   -h  help
 
 EOF
 }
 
-declare maxConcurrentJobs=5
+declare logDir=''
+declare logFileSuffix=''
+declare logFileName=''
+declare intervalSeconds=''
+declare maxConcurrentJobs=''
 declare jobrunConfigFile=jobrun.conf
-declare jobsConfigfile=jobs.conf
-declare DEBUG='N'
+declare jobsConfigFile=jobs.conf
+declare DEBUG=''
+declare dryRun='N'
 
-while getopts j:r:m:dhz arg
+while getopts s:t:u:i:m:j:r:hzdny arg
 do
 	case $arg in
-		j) jobsConfigfile=$OPTARG;;
-		r) jobrunConfigfile=$OPTARG;;
+		i) intervalSeconds=$OPTARG;;
+		s) logDir=$OPTARG;;
+		t) logFileName=$OPTARG;;
+		u) logFileSuffix=$OPTARG;;
 		m) maxConcurrentJobs=$OPTARG;;
 		d) DEBUG='Y';;
+		n) DEBUG='N';;  # override config file
+		j) jobsConfigFile=$OPTARG;;
+		r) jobrunConfigFile=$OPTARG;;
+		y) dryRun='Y';;
 		hz) help; exit 0;;
 		*) help; exit 1;;
-
 	esac
 done
 
-set -u
+echo "interval seconds: $intervalSeconds"
 
-declare PGID=$$
-
-declare -A runningJobs=()
-declare -A runningPIDS
-declare -A completedJobs
-declare intervalSeconds=3
-
-declare numberJobsRunning
-declare pidFileDir=pidfiles
-
-onTerm () {
-	echo
-	echo "TERM: Cleaning up"
-	ps -o pgid,pid,ppid,cmd | grep "^$PGID"
-	kill -KILL -- -$PGID
-	echo
-	exit
+fileIsReadable () {
+	if [[ -r "$1" ]]; then
+		return 0
+	else
+		return 1
+	fi
 }
 
-trap onTerm SIGV TERM INT
+getTimestamp () {
+	date '+%Y-%m-%d %H:%M:%S'
+}
 
 banner () {
 	echo
@@ -94,19 +87,6 @@ subBanner () {
 	echo "   == $@ "
 	echo '   ============================================================'
 	echo
-}
-
-
-fileIsReadable () {
-	if [[ -r "$1" ]]; then
-		return 0
-	else
-		return 1
-	fi
-}
-
-getTimestamp () {
-	date '+%Y-%m-%d %H:%M:%S'
 }
 
 # return array of key value pairs
@@ -154,17 +134,104 @@ showKV () {
 	return 0
 }
 
-
 declare -A jobsConf
 declare -A jobrunConf
 
-banner "getKV jobrun.conf"
-getKV jobrunConf jobrun.conf
+banner "getKV $jobrunConfigFile"
+getKV jobrunConf $jobrunConfigFile
 showKV jobrunConf
 
-banner "getKV jobs.conf"
-getKV jobsConf jobs.conf
+banner "getKV $jobsConfigFile"
+getKV jobsConf $jobsConfigFile
 showKV jobsConf
+
+
+# set config values from jobrun.conf
+if [[ ${jobrunConf['debug']} ]]; then
+	[ ${jobrunConf['debug']} == '1' -a -z "$DEBUG" ] && { DEBUG='Y'; }
+else
+	DEBUG='N'
+fi
+
+if [[ $maxConcurrentJobs ]]; then
+	[ -n ${jobrunConf['maxjobs']} -a -z "$maxConcurrentJobs" ] && { maxConcurrentJobs=${jobrunConf['maxjobs']}; }
+else
+	maxConcurrentJobs=5
+fi
+
+if [[ $intervalSeconds ]]; then
+	[ -n ${jobrunConf['iteration-seconds']} -a -z "$intervalSeconds" ] && { intervalSeconds=${jobrunConf['iteration-seconds']}; }
+else
+	intervalSeconds=10
+fi
+
+if [[ ${jobrunConf['logdir']} ]]; then
+	[ -n "${jobrunConf['logdir']}" -a -z "$logDir" ] && { logDir=${jobrunConf['logdir']}; }
+else
+	logDir='logs';
+fi
+
+if [[ ${jobrunConf['logfile']} ]]; then
+	[ -n "${jobrunConf['logfile']}" -a -z "$logFileName" ] && { logFileName=${jobrunConf['logfile']}; }
+else
+	logFileName='jobrun-sh'
+fi
+
+if [[ ${jobrunConf['logfile-suffix']} ]]; then
+	[ -n "${jobrunConf['logfile-suffix']}" -a -z "$logFileSuffix" ] && { logFileSuffix=${jobrunConf['logfile-suffix']}; }
+else
+	logFileSuffix='log'
+fi
+
+mkdir -p $logDir
+logFile=$logDir/$logFileName-$(date +%Y-%m-%d_%H-%M-%S).$logFileSuffix
+
+cat <<-EOF
+
+           logDir: $logDir
+    logFileSuffix: $logFileSuffix
+      logFileName: $logFileName
+  intervalSeconds: $intervalSeconds
+          logFile: $logFile
+maxConcurrentJobs: $maxConcurrentJobs
+ jobrunConfigFile: $jobrunConfigFile
+   jobsConfigFile: $jobsConfigFile
+            debug: $DEBUG
+
+EOF
+
+[[ $dryRun == 'Y' ]] && { exit; }
+
+# Redirect stdout ( > ) into a named pipe ( >() ) running "tee"
+# process substitution
+# clear/recreate the logfile
+> $logFile
+exec 1> >(tee -ia $logFile)
+tee01PID=$!
+exec 2> >(tee -ia $logFile >&2)
+tee02PID=$!
+
+set -u
+
+declare PGID=$$
+
+declare -A runningJobs=()
+declare -A runningPIDS
+declare -A completedJobs
+
+declare numberJobsRunning
+declare pidFileDir=pidfiles
+
+onTerm () {
+	echo
+	echo "TERM: Cleaning up"
+	ps -o pgid,pid,ppid,cmd | grep "^$PGID"
+	kill -KILL -- -$PGID
+	echo
+	exit
+}
+
+trap onTerm SEGV TERM INT
 
 declare -a jobKeys ##="${!jobsConf[@]}"
 for v in ${!jobsConf[@]}
@@ -172,22 +239,18 @@ do
 	jobKeys+=($v)
 done
 
-
-#maxConcurrentJobs=5
 numberJobsRunning=0
-#runningJobs=()
-
 userName=$(id -un)
 
 pidCleanup () {
 
-	local -a pidsToRemove
+	local -a pidsToRemove=()
 
 	[[ $DEBUG == 'Y' ]] && { showKV runningPIDS; }
 
 	for runPID in ${!runningPIDS[@]} 
 	do
-		echo "chk runPID: $runPID"
+		[[ $DEBUG == 'Y' ]] && { echo "chk runPID: $runPID"; }
 		psOUT=$(ps --no-headers -p $runPID -o user,pid | grep "^$userName")
 		declare RC=$?
 
@@ -200,14 +263,23 @@ pidCleanup () {
 		timestamp="$(getTimestamp)"
 
 		if [[ $RC -eq 0 ]]; then
-			echo "running PID Job: ${runningPIDS[$runPID]}"
+			echo "PID Job still running: ${runningPIDS[$runPID]}"
 			echo "$timestamp - still running "  >> $pidFileDir/${runPID}.pid 
 		else
 			echo "$timestamp - finished "  >> $pidFileDir/${runPID}.pid 
 			declare currJob=${runningPIDS[$runPID]}
 			unset runningJobs[$currJob]
+			pidsToRemove+=($runPID)
 			(( numberJobsRunning-- ))
 		fi
+	done
+
+	# clean up runningPIDS after loop
+	[[ $DEBUG == 'Y' ]] && { echo "=====>>>> pidsToRemove:"; }
+	for pid in ${pidsToRemove[@]}
+	do
+		[[ $DEBUG == 'Y' ]] && { echo "=====>>>> remove runningPID: $pid"; }
+		unset runningPIDS[$pid]
 	done
 
 	return

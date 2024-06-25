@@ -48,7 +48,11 @@ A PID file created when jobrun.pl starts.
 
 ### jobrun.pl
 
-The main script
+The main Perl script
+
+### jobrun.sh
+
+Alternative Bash script
 
 ### jobs.conf
 
