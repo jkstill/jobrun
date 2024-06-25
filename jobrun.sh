@@ -222,8 +222,8 @@ do
 
 		echo "jobKeys count: ${#jobKeys[@]}"
 
+		[[ ${#jobKeys[@]} -lt 1 ]] && { break; }
 		jobKey="${jobKeys[0]}"
-		[[ -z $jobKey ]] && { break; }
 
 		echo jobkey: $jobKey
 		echo "jobsConf count: ${#jobsConf[@]}"
@@ -254,12 +254,19 @@ do
 
 done
 
-for $pi
-
-pidCleanup
+# may still be jobs running
+while [[ ${#runningJobs[@]} -gt 0 ]]
+do
+	echo "check for any remaining jobs to complete"
+	pidCleanup
+	sleep $intervalSeconds
+done
 
 kill $tee01PID $tee02PID
-wait
+
+echo
+echo "should be no output here other than captions"
+echo 
 
 echo "runningJobs:"
 showKV runningJobs
@@ -269,6 +276,5 @@ showKV jobsConf
 
 echo "jobKeys:"
 showKV jobKeys
-
 
 
