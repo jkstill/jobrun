@@ -23,7 +23,7 @@ help () {
   -s  log directory  - default logs
   -t  log file base name - default jobrun-sh
   -u  log file suffix - default log
-  -d  debug on
+  -d  debug on - output is to STDERR
   -n  debug off - overrides config file
   -y  dry run - read arguments, config file, show variables and exit
   -h  help
@@ -79,14 +79,18 @@ banner () {
 	echo "## $@ "
 	echo '############################################################'
 	echo
+	return 0
 }
 
 subBanner () {
-	echo
-	echo '   ============================================================'
-	echo "   == $@ "
-	echo '   ============================================================'
-	echo
+	echo '==============================='
+	echo "=== $@ ==="
+	return 0
+}
+
+debugBanner () {
+	[[ $DEBUG == 'Y' ]] && { echo "%%  $@"; }
+	return 0
 }
 
 # return array of key value pairs
@@ -99,10 +103,8 @@ getKV () {
 	if [[ $RC -eq 0 ]]; then
 		while IFS=: read key value
 		do
-			if [[ $DEBUG == 'Y' ]]; then
-				echo "getKV - key: $key  value: $value" 1>&2
-				echo "$arrayName['$key']"="'$value'"
-			fi
+			debugBanner "getKV - key: $key  value: $value"
+			debugBanner "$arrayName['$key']"="'$value'"
 			eval "$arrayName['$key']"="'$value'"
 		done < <(grep -Ev '^\s*$|^\s*#' $fileName) 
 	else
@@ -116,6 +118,8 @@ showKV () {
 	#local -n arrayName="$1" #[@];shift
 	# value required in older versions
 
+	local bannerPrefix=''
+	[[ $DEBUG == 'Y' ]] && { bannerPrefix='%%'; }
 	local arrayName="$1"
 
 	local -a keys
@@ -127,7 +131,7 @@ showKV () {
 	for key in ${keys[@]}
 	do
 		eval 'val=${'$arrayName'['$key']}'
-		echo "key: $key  val: $val"
+		echo "$bannerPrefix key: $key  val: $val"
 		#echo key: $key
 	done
 
@@ -246,19 +250,18 @@ pidCleanup () {
 
 	local -a pidsToRemove=()
 
+	debugBanner 'runningPIDs'
 	[[ $DEBUG == 'Y' ]] && { showKV runningPIDS; }
 
 	for runPID in ${!runningPIDS[@]} 
 	do
-		[[ $DEBUG == 'Y' ]] && { echo "chk runPID: $runPID"; }
+		debugBanner "chk runPID: $runPID"
 		psOUT=$(ps --no-headers -p $runPID -o user,pid | grep "^$userName")
 		declare RC=$?
 
-		if [[ $DEBUG == 'Y' ]]; then
-			echo "RC: $RC"
-			echo "psOUT: $psOUT"
-			echo "runPID: $runPID"
-		fi
+		debugBanner "RC: $RC"
+		debugBanner "psOUT: $psOUT"
+		debugBanner "runPID: $runPID"
 
 		timestamp="$(getTimestamp)"
 
@@ -275,10 +278,10 @@ pidCleanup () {
 	done
 
 	# clean up runningPIDS after loop
-	[[ $DEBUG == 'Y' ]] && { echo "=====>>>> pidsToRemove:"; }
+	debugBanner "=====>>>> pidsToRemove:"
 	for pid in ${pidsToRemove[@]}
 	do
-		[[ $DEBUG == 'Y' ]] && { echo "=====>>>> remove runningPID: $pid"; }
+		debugBanner "=====>>>> remove runningPID: $pid"
 		unset runningPIDS[$pid]
 	done
 
@@ -316,7 +319,7 @@ do
 
 	fi
 
-	echo "Checking RunPIDS"
+	subBanner "Checking RunPIDS"
 	pidCleanup
 
 	#[[ ${#jobsConf[@]} -lt 0 ]] && { break; }
@@ -327,9 +330,10 @@ do
 done
 
 # may still be jobs running
+subBanner "check for any remaining jobs to complete"
 while [[ ${#runningJobs[@]} -gt 0 ]]
 do
-	echo "check for any remaining jobs to complete"
+	echo "Calling PID Cleanup"
 	pidCleanup
 	sleep $intervalSeconds
 done
@@ -337,7 +341,7 @@ done
 kill $tee01PID $tee02PID
 
 echo
-echo "should be no output here other than captions"
+echo "There should be no output following here other than captions"
 echo 
 
 echo "runningJobs:"
