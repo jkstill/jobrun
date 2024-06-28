@@ -66,7 +66,7 @@ A test job.
 
 Logic for controlling semaphores and job creation
 
-### Examples
+### Examples - jobrun.pl
 
 Start a session:
 
@@ -89,7 +89,74 @@ These values are already set in the jobs.conf file, so send HUP to cause the con
 $  kill -1 $(cat jobrun.pid)
 ```
 
-## Help
+### Examples - jobrun.sh
+
+
+```text
+./jobrun.sh -n -i 2 -m 3 -s logs-sh -t jobrun-sh
+```
+
+The following options override the jobrun.conf configuration file
+
+'-n': debug off
+
+'-i 2':  set the loop interval to 2 seconds
+
+'-m': max number of concurrent jobs set to 3
+
+'-s logs-sh':  the name of the log directory
+
+'-t jobrun-sh': log file base name
+
+```
+
+Addd '-y' for the dry run option:
+
+```text
+$  ./jobrun.sh -n -i 2 -m 3 -s logs-sh -t jobrun-sh $@ -y
+interval seconds: 2
+
+############################################################
+## getKV jobrun.conf
+############################################################
+
+ key: logdir  val: ./logs
+ key: logfile  val: jobrun-sem
+ key: verbose  val: 1
+ key: logfile-suffix  val: log
+ key: maxjobs  val: 4
+ key: debug  val: 1
+ key: iteration-seconds  val: 9
+
+############################################################
+## getKV jobs.conf
+############################################################
+
+ key: job-10  val: ./test-job.sh job-10 10
+ key: job-1  val: ./test-job.sh job-1 10
+ key: job-3  val: ./test-job.sh job-3 10
+ key: job-2  val: ./test-job.sh job-2 10
+ key: job-5  val: ./test-job.sh job-5 10
+ key: job-4  val: ./test-job.sh job-4 10
+ key: job-7  val: ./test-job.sh job-7 10
+ key: job-6  val: ./test-job.sh job-6 10
+ key: job-9  val: ./test-job.sh job-9 10
+ key: job-8  val: ./test-job.sh job-8 10
+
+           logDir: logs-sh
+    logFileSuffix: log
+      logFileName: jobrun-sh
+  intervalSeconds: 2
+          logFile: logs-sh/jobrun-sh-2024-06-28_14-46-18.log
+maxConcurrentJobs: 3
+ jobrunConfigFile: jobrun.conf
+   jobsConfigFile: jobs.conf
+            debug: N
+```
+
+
+
+## Help - jobrun.pl
 
 ```text
   ./jobrun.pl -h
@@ -145,6 +212,25 @@ Example:
  It may take a few moments for the chilren to die.
 
  The fastest method to stop jobrun is CTL-\
+```
+
+### Help - jobrun.sh
+
+```text
+./jobrun.sh
+
+
+  -i  interval seconds - default 10
+  -j  jobs config file - default jobs.conf
+  -r  jobrun config file - default jobrun.conf
+  -m  max concurrent jobs - default 5
+  -s  log directory  - default logs
+  -t  log file base name - default jobrun-sh
+  -u  log file suffix - default log
+  -d  debug on - output is to STDERR
+  -n  debug off - overrides config file
+  -y  dry run - read arguments, config file, show variables and exit
+  -h  help
 ```
 
 ### Things to implement
