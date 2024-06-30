@@ -16,6 +16,7 @@ help () {
 	cat <<-EOF
 
 
+  -f  timestamp format - default %Y-%m-%d %H-%M-%S
   -i  interval seconds - default 10
   -j  jobs config file - default jobs.conf
   -r  jobrun config file - default jobrun.conf
@@ -31,6 +32,7 @@ help () {
 EOF
 }
 
+declare timestampFormat=''
 declare logDir=''
 declare logFileSuffix=''
 declare logFileName=''
@@ -41,9 +43,10 @@ declare jobsConfigFile=jobs.conf
 declare DEBUG=''
 declare dryRun='N'
 
-while getopts s:t:u:i:m:j:r:hzdny arg
+while getopts f:s:t:u:i:m:j:r:hzdny arg
 do
 	case $arg in
+		f) timestampFormat="$OPTARG";;
 		i) intervalSeconds=$OPTARG;;
 		s) logDir=$OPTARG;;
 		t) logFileName=$OPTARG;;
@@ -70,7 +73,7 @@ fileIsReadable () {
 }
 
 getTimestamp () {
-	date '+%Y-%m-%d %H:%M:%S'
+	date "+$timestampFormat"
 }
 
 banner () {
@@ -89,8 +92,12 @@ subBanner () {
 }
 
 debugBanner () {
-	[[ $DEBUG == 'Y' ]] && { echo "%%  $@"; }
+	[[ $DEBUG == 'Y' ]] && { echo '%% ' $(getTimestamp) ": $@"; }
 	return 0
+}
+
+stdoutBanner () {
+	echo $(getTimestamp) ":$@"
 }
 
 # return array of key value pairs
@@ -108,7 +115,7 @@ getKV () {
 			eval "$arrayName['$key']"="'$value'"
 		done < <(grep -Ev '^\s*$|^\s*#' $fileName) 
 	else
-		echo "cannot read file $fileName"
+		stdoutBanner "cannot read file $fileName"
 		exit 1
 	fi
 }
@@ -132,7 +139,6 @@ showKV () {
 	do
 		eval 'val=${'$arrayName'['$key']}'
 		echo "$bannerPrefix key: $key  val: $val"
-		#echo key: $key
 	done
 
 	return 0
@@ -157,34 +163,54 @@ else
 	DEBUG='N'
 fi
 
-if [[ $maxConcurrentJobs ]]; then
-	[ -n ${jobrunConf['maxjobs']} -a -z "$maxConcurrentJobs" ] && { maxConcurrentJobs=${jobrunConf['maxjobs']}; }
-else
-	maxConcurrentJobs=5
+echo "time format $timestampFormat|"
+
+if [[ -z $timestampFormat ]]; then
+	if [[ -n ${jobrunConf['timestamp-format']} ]]; then
+		timestampFormat=${jobrunConf['timestamp-format']}
+	else
+		timestampFormat='%Y-%m-%d %H:%M:%S'
+	fi
 fi
 
-if [[ $intervalSeconds ]]; then
-	[ -n ${jobrunConf['iteration-seconds']} -a -z "$intervalSeconds" ] && { intervalSeconds=${jobrunConf['iteration-seconds']}; }
-else
-	intervalSeconds=10
+if [[ -z $maxConcurrentJobs ]]; then
+	if [[ -n ${jobrunConf['maxjobs']} ]]; then
+		maxConcurrentJobs=${jobrunConf['maxjobs']}
+	else
+		maxConcurrentJobs=5
+	fi
 fi
 
-if [[ ${jobrunConf['logdir']} ]]; then
-	[ -n "${jobrunConf['logdir']}" -a -z "$logDir" ] && { logDir=${jobrunConf['logdir']}; }
-else
-	logDir='logs';
+if [[ -z $intervalSeconds ]]; then
+	if [[ -n ${jobrunConf['iteration-seconds']} ]]; then
+		{ intervalSeconds=${jobrunConf['iteration-seconds']}; }
+	else
+		intervalSeconds=10
+	fi
 fi
 
-if [[ ${jobrunConf['logfile']} ]]; then
-	[ -n "${jobrunConf['logfile']}" -a -z "$logFileName" ] && { logFileName=${jobrunConf['logfile']}; }
-else
-	logFileName='jobrun-sh'
+if [[ -z $logDir ]]; then
+	if [[ -n "${jobrunConf['logdir']}" ]]; then
+		logDir=${jobrunConf['logdir']}
+	else
+		logDir='logs';
+	fi
 fi
 
-if [[ ${jobrunConf['logfile-suffix']} ]]; then
-	[ -n "${jobrunConf['logfile-suffix']}" -a -z "$logFileSuffix" ] && { logFileSuffix=${jobrunConf['logfile-suffix']}; }
-else
-	logFileSuffix='log'
+if [[ -z $logFileName ]]; then
+	if [[ -n ${jobrunConf['logfile']} ]]; then
+		logFileName=${jobrunConf['logfile']}
+	else
+		logFileName='jobrun-sh'
+	fi
+fi
+
+if [[ -z $logFileSuffix ]]; then
+	if [[ -n "${jobrunConf['logfile-suffix']}" ]]; then
+		logFileSuffix=${jobrunConf['logfile-suffix']}
+	else
+		logFileSuffix='log'
+	fi
 fi
 
 mkdir -p $logDir
@@ -192,6 +218,7 @@ logFile=$logDir/$logFileName-$(date +%Y-%m-%d_%H-%M-%S).$logFileSuffix
 
 cat <<-EOF
 
+  timestampFormat: $timestampFormat
            logDir: $logDir
     logFileSuffix: $logFileSuffix
       logFileName: $logFileName
@@ -228,7 +255,7 @@ declare pidFileDir=pidfiles
 
 onTerm () {
 	echo
-	echo "TERM: Cleaning up"
+	stdoutBanner "TERM: Cleaning up"
 	ps -o pgid,pid,ppid,cmd | grep "^$PGID"
 	kill -KILL -- -$PGID
 	echo
@@ -266,10 +293,10 @@ pidCleanup () {
 		timestamp="$(getTimestamp)"
 
 		if [[ $RC -eq 0 ]]; then
-			echo "PID Job still running: ${runningPIDS[$runPID]}"
-			echo "$timestamp - still running "  >> $pidFileDir/${runPID}.pid 
+			stdoutBanner "PID Job still running: ${runningPIDS[$runPID]}"
+			stdoutBanner "$timestamp - still running "  >> $pidFileDir/${runPID}.pid 
 		else
-			echo "$timestamp - finished "  >> $pidFileDir/${runPID}.pid 
+			stdoutBanner "$timestamp - finished "  >> $pidFileDir/${runPID}.pid 
 			declare currJob=${runningPIDS[$runPID]}
 			unset runningJobs[$currJob]
 			pidsToRemove+=($runPID)
@@ -295,26 +322,26 @@ do
 
 	if [[ ${#runningJobs[@]} -lt $maxConcurrentJobs ]]; then
 
-		echo "jobKeys count: ${#jobKeys[@]}"
+		stdoutBanner "jobKeys count: ${#jobKeys[@]}"
 
 		[[ ${#jobKeys[@]} -lt 1 ]] && { break; }
 		jobKey="${jobKeys[0]}"
 
-		echo jobkey: $jobKey
-		echo "jobsConf count: ${#jobsConf[@]}"
+		stdoutBanner jobkey: $jobKey
+		stdoutBanner "jobsConf count: ${#jobsConf[@]}"
 
 		jobKeys=(${jobKeys[@]:1}) # shift array
 		(( numberJobsRunning++ ))
 		runningJobs[$jobKey]=${jobsConf[$jobKey]}
 
-		echo "run: ${jobsConf[$jobKey]}"
+		stdoutBanner "run: ${jobsConf[$jobKey]}"
 		exec ${jobsConf[$jobKey]} &
 		childPID=$!
 		runningPIDS[$childPID]=$jobKey
 
 		ps -p $childPID -o pid,ppid,cmd > $pidFileDir/${childPID}.pid
 		unset jobsConf[$jobKey]
-		echo "Continuing"
+		stdoutBanner "Continuing"
 		continue
 
 	fi
@@ -324,7 +351,7 @@ do
 
 	#[[ ${#jobsConf[@]} -lt 0 ]] && { break; }
 
-	echo "sleep $intervalSeconds"
+	stdoutBanner "sleep $intervalSeconds"
 	sleep $intervalSeconds
 
 done
@@ -333,14 +360,14 @@ done
 subBanner "check for any remaining jobs to complete"
 while [[ ${#runningJobs[@]} -gt 0 ]]
 do
-	echo "Calling PID Cleanup"
+	stdoutBanner "Calling PID Cleanup"
 	pidCleanup
 	sleep $intervalSeconds
 done
 
 kill $tee01PID $tee02PID
 
-echo
+stdoutBanner
 echo "There should be no output following here other than captions"
 echo 
 
