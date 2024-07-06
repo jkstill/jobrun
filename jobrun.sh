@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
 
-
 # does not work in Bash 3
 # does work in Bash 4.2, possibly earlier
 
@@ -9,12 +8,16 @@ scriptHome=$(dirname -- "$( readlink -f -- "$0"; )")
 
 cd $scriptHome || { echo "could not cd $scriptHome"; exit 1; }
 
-
 help () {
 	echo
 	echo $0
 	cat <<-EOF
 
+
+  -c  resumable
+      if the script is terminated with -TERM or -INT (CTL-C for instance)
+      a temporary job configuration file is created for jobs not completed
+      this file will be used to restart if -c is again used
 
   -f  timestamp format - default %Y-%m-%d %H-%M-%S
   -i  interval seconds - default 10
@@ -42,20 +45,22 @@ declare jobrunConfigFile=jobrun.conf
 declare jobsConfigFile=jobs.conf
 declare DEBUG=''
 declare dryRun='N'
+declare resumable='N'
 
-while getopts f:s:t:u:i:m:j:r:hzdny arg
+while getopts f:s:t:u:i:m:j:r:chzdny arg
 do
 	case $arg in
+		c) resumable='Y';;
+		d) DEBUG='Y';;
 		f) timestampFormat="$OPTARG";;
 		i) intervalSeconds=$OPTARG;;
+		j) jobsConfigFile=$OPTARG;;
+		m) maxConcurrentJobs=$OPTARG;;
+		n) DEBUG='N';;  # override config file
+		r) jobrunConfigFile=$OPTARG;;
 		s) logDir=$OPTARG;;
 		t) logFileName=$OPTARG;;
 		u) logFileSuffix=$OPTARG;;
-		m) maxConcurrentJobs=$OPTARG;;
-		d) DEBUG='Y';;
-		n) DEBUG='N';;  # override config file
-		j) jobsConfigFile=$OPTARG;;
-		r) jobrunConfigFile=$OPTARG;;
 		y) dryRun='Y';;
 		hz) help; exit 0;;
 		*) help; exit 1;;
@@ -144,16 +149,35 @@ showKV () {
 	return 0
 }
 
-declare -A jobsConf
-declare -A jobrunConf
+declare -A jobsConf=()
+declare -A allJobsConf=()
+declare -A jobrunConf=()
+
+declare -A runningJobs=()
+declare -A runningPIDS=()
+declare -A completedJobs=()
+
 
 banner "getKV $jobrunConfigFile"
 getKV jobrunConf $jobrunConfigFile
 showKV jobrunConf
 
+# assuming filename of file.extension
+declare resumableFile="$(echo $jobsConfigFile | cut -f1 -d\.)".resume
+
+# use the resumable file if flag is set and file is available
+[ "$resumable" == 'Y' -a -r "$resumableFile" ] && { jobsConfigFile=$resumableFile; }
 banner "getKV $jobsConfigFile"
 getKV jobsConf $jobsConfigFile
 showKV jobsConf
+
+# this copy of jobsConf does not get altered anywhere
+banner 'create $allJobsConf'
+for jobID in ${!jobsConf[@]}
+do
+	allJobsConf[$jobID]=${jobsConf[$jobID]}
+done
+showKV allJobsConf
 
 
 # set config values from jobrun.conf
@@ -162,8 +186,6 @@ if [[ ${jobrunConf['debug']} ]]; then
 else
 	DEBUG='N'
 fi
-
-echo "time format $timestampFormat|"
 
 if [[ -z $timestampFormat ]]; then
 	if [[ -n ${jobrunConf['timestamp-format']} ]]; then
@@ -228,6 +250,8 @@ maxConcurrentJobs: $maxConcurrentJobs
  jobrunConfigFile: $jobrunConfigFile
    jobsConfigFile: $jobsConfigFile
             debug: $DEBUG
+        resumable: $resumable
+    resumableFile: $resumableFile
 
 EOF
 
@@ -246,19 +270,49 @@ set -u
 
 declare PGID=$$
 
-declare -A runningJobs=()
-declare -A runningPIDS
-declare -A completedJobs
-
 declare numberJobsRunning
 declare pidFileDir=pidfiles
+
+writeResumableFile () {
+	> $resumableFile
+	set +u
+	for jobID in ${!allJobsConf[@]}
+	do
+		[[ "$DEBUG" == 'Y' ]] && {
+			cat <<-EOF
+
+ resumable: |${allJobsConf[$jobID]}| : |${completedJobs[$jobID]}|
+
+			EOF
+		}
+		[[ ${allJobsConf[$jobID]} != ${completedJobs[$jobID]} ]] && {
+			echo "$jobID:${allJobsConf[$jobID]}" >> $resumableFile
+		}
+	done
+}
 
 onTerm () {
 	echo
 	stdoutBanner "TERM: Cleaning up"
+
+	[[ "$DEBUG" == 'Y' ]] && {
+		banner 'runningJobs array'
+		showKV runningJobs
+		banner 'runningPIDS array'
+		showKV runningPIDS
+		banner 'completedJobs array'
+		showKV completedJobs
+		echo 
+	}
+
+	# if resumable flag used, write out a file of jobs to run
+	# these will be jobsConf - completedJobs
+	[[ $resumable == 'Y' ]] && { writeResumableFile; }
+	
 	ps -o pgid,pid,ppid,cmd | grep "^$PGID"
 	kill -KILL -- -$PGID
 	echo
+
 	exit
 }
 
@@ -298,6 +352,7 @@ pidCleanup () {
 		else
 			stdoutBanner "$timestamp - finished "  >> $pidFileDir/${runPID}.pid 
 			declare currJob=${runningPIDS[$runPID]}
+			completedJobs[$currJob]=${runningJobs[$currJob]}
 			unset runningJobs[$currJob]
 			pidsToRemove+=($runPID)
 			(( numberJobsRunning-- ))
@@ -366,6 +421,9 @@ do
 done
 
 kill $tee01PID $tee02PID
+
+# remove the resumable file if flag is set and normal exit
+[ "$resumable" == 'Y' -a -r "$resumableFile" ] && { rm -f $resumableFile; }
 
 stdoutBanner
 echo "There should be no output following here other than captions"
