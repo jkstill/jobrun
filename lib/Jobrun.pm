@@ -24,11 +24,12 @@ use Data::Dumper;
 use File::Temp qw/ :seekable tmpnam/;
 #use Time::HiRes qw( usleep );
 use IPC::Shareable;
+use IO::File;
 use lib '.';
 
 require Exporter;
 our @ISA= qw(Exporter);
-our @EXPORT_OK = q();
+our @EXPORT_OK = qw(logger %allJobs);
 our @EXPORT = qw();
 our $VERSION = '0.01';
 
@@ -42,8 +43,19 @@ my %shmOptions = (
 );
 
 my $jobPidsSHMKey = 'jobpid';
-my %jobPids=();
+my $completedJobsSHMKey  = 'completed-id';
+my $pidTreeSSHMKey = 'pidtree';
+our %jobPids=();
 tie %jobPids, 'IPC::Shareable', $jobPidsSHMKey, { %shmOptions } or die "tie failed jobPids - $!\n";
+
+our %completedJobs=();
+tie %completedJobs, 'IPC::Shareable', $completedJobsSHMKey, { %shmOptions } or die "tie failed %completedJobs= - $!\n";
+
+# %allJobs used when creating resumable file
+our %allJobs;
+# %pidTree used to track if jobs completed when eix
+our %pidTree;
+tie %pidTree, 'IPC::Shareable', $pidTreeSSHMKey, { %shmOptions } or die "tie failed %pidTree= - $!\n";
 
 use constant {
     SEM_CHILD_COUNT => 0, # Index for child count semaphore
@@ -58,6 +70,17 @@ my $sem = IPC::Semaphore->new($sem_key, 2, S_IRUSR | S_IWUSR | IPC_CREAT) or die
 # Initialize semaphore values
 $sem->setval(SEM_CHILD_COUNT, 0);
 $sem->setval(SEM_LOCK, 1); # 1 indicates that the lock is available
+
+sub logger {
+	my $fh = shift @_;
+	my $verbose = shift @_;
+	while (@_) {
+		my $line = shift @_;
+		$fh->print($line);
+		print "$line" if $verbose;
+	}
+	return;
+}
 
 sub new {
    my $pkg = shift;
@@ -110,15 +133,17 @@ sub getChildrenCount {
 }
 
 sub cleanup {
-    # This should be called to cleanup semaphores, typically on program exit
-    # or when the job engine dies unexpectedly.
-    lock();
-    $sem->setval(SEM_CHILD_COUNT, 0);
-    $sem->setval(SEM_LOCK, 1);
-    unlock();
-    $sem->remove();
-	 undef %jobPids;
-	 return;
+	# This should be called to cleanup semaphores, typically on program exit
+	# or when the job engine dies unexpectedly.
+	lock();
+	$sem->setval(SEM_CHILD_COUNT, 0);
+	$sem->setval(SEM_LOCK, 1);
+	unlock();
+	$sem->remove();
+	undef %jobPids;
+	undef %completedJobs;
+	undef %pidTree;
+	return;
 }
 
 sub status {
@@ -127,6 +152,45 @@ sub status {
 		print "job: $key status: $jobPids{$key}\n";
 	}
 	print "====================================\n";
+	return;
+}
+
+sub showCompletedJobs {
+
+	print "===  COMPLETED ===\n";
+	foreach my $key ( sort keys %completedJobs ) {
+		print "job: $key status: $completedJobs{$key}\n";
+	}
+	print "====================================\n";
+	return;
+
+}
+
+sub showAllJobs {
+	foreach my $key ( sort keys %allJobs ) {
+		#$fh->print("$key:$allJobs{$key}\n") unless exists($completedJobs{$key});
+		print "$key:$allJobs{$key}\n";
+	}
+	return;
+}
+
+sub createResumableFile {
+	my ($resumableFileName) = @_;
+
+	my $fh = new IO::File;
+	$fh->open($resumableFileName, '>') or die "could not create resumable file - $resumableFileName: $!\n";
+
+	foreach my $key ( sort keys %allJobs ) {
+		$fh->print("$key:$allJobs{$key}\n") unless exists($completedJobs{$key});
+		#$fh->print("$key:$allJobs{$key}\n");
+	}
+	return;
+}
+
+# remove the file if empty
+sub cleanupResumableFile {
+	my ($resumableFileName) = @_;
+	-z $resumableFileName && unlink $resumableFileName;
 	return;
 }
 
@@ -139,6 +203,7 @@ sub child {
 	my ($jobName,$cmd) = @_;
 
 	#print 'SELF: ' . Dumper($self);
+	my $grantParentPID=$$;
 
 	my $child = fork();
 	#die("Can't fork: $!") unless defined ($child = fork());
@@ -148,7 +213,7 @@ sub child {
 		$self->{LOGGER}( "child:$$  cmd:$self->{CMD}\n");
 
 	} else {
-
+		my $parentPID=$$;
 		my $grandChild = fork();	
 		die("Can't fork #2: $!") unless defined($grandChild);
 
@@ -156,6 +221,8 @@ sub child {
 			# use system() here
 			#qx/$cmd/;
 			my $pid=$$;
+			$pidTree{$grantParentPID}->{$parentPID}=$pid;
+
 			$jobPids{$self->{JOBNAME}} = "$pid:running";
 
 			$self->{LOGGER}( "grandChild:$pid:running\n");
@@ -163,9 +230,29 @@ sub child {
 			$self->{LOGGER} ( "grancChild:$pid running job $self->{JOBNAME}\n");
 			system($self->{CMD});
 			my $rc = $?;
+
+			if ( $rc != 0 ) {
+				$self->{LOGGER} ("#######################################\n");
+				$self->{LOGGER} ("## error with $self->{JOBNAME}\n");
+				$self->{LOGGER} ("## CMD: $self->{CMD}\n");
+				$self->{LOGGER} ("#######################################\n");
+			}
+
+			if ($rc == -1) {
+				$self->{LOGGER} ("!!failed to execute: $!\n");
+			}
+			elsif ($rc & 127) {
+				$self->{LOGGER} (sprintf "!!child died with signal %d, %s coredump\n",
+					($rc & 127),  ($rc & 128) ? 'with' : 'without');
+			}
+			else {
+				$self->{LOGGER} (sprintf "!!child exited with value %d\n", $? >> 8);
+			}
 	
 			decrementChildren();
 			$jobPids{$self->{JOBNAME}} = "$pid:complete";
+			$completedJobs{$self->{JOBNAME}} = $self->{CMD};
+			delete $pidTree{$grantParentPID}->{$parentPID};
 			exit $rc;
 		} else {
 			exit 0;
