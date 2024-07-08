@@ -219,6 +219,10 @@ Example:
 ```text
 ./jobrun.sh
 
+  -c  resumable
+      if the script is terminated with -TERM or -INT (CTL-C for instance)
+      a temporary job configuration file is created for jobs not completed
+      this file will be used to restart if -c is again used
 
   -i  interval seconds - default 10
   -j  jobs config file - default jobs.conf
@@ -237,6 +241,7 @@ Example:
 
 - track job by pid, job name and status
 - resumable - persist status and results
+  (done in bash version)
   - option - set a jobrun ID for the batch of jobs
     - used to identify file
 	 - or maybe just a name for the results file
