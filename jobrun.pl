@@ -329,6 +329,11 @@ print q{
   --maxjobs            number of jobs to run concurrently. default: 9
   --logfile-base       logfile basename. default: jobrun-sem
   --status             show status of currently running child jobs
+
+  --resumable          if the script is terminated with -TERM or -INT (CTL-C for instance)
+                       a temporary job configuration file is created for jobs not completed
+                       this file will be used to restart if --resumable is again used
+
   --kill               kill the current child jobs and parent
   --logfile-suffix     logfile suffix. default: log
   --reload-config      reload the config file
@@ -340,10 +345,11 @@ Example:
 
   ./jobrun.pl --logfile-suffix=load-log --job-config-file dbjobs.conf --maxjobs 1 --nodebug --noverbose
 
+  ./jobrun.pl --verbose --resumable --iteration-seconds 2 --config-file perl-run.conf --job-config-file perl-jobs.conf
 
  When jobrun.pl starts, it will create a file 'jobrun.pid' in the current directory.
 
- There are traps on the HUP, INT, TERM and QUIT signals.
+ There are traps on the INT, TERM and QUIT signals.
 
  Pressing CTL-C will not stop jobrun, but it will print a status message.
 
