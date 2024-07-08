@@ -70,9 +70,10 @@ use constant {
 
 
 # Create semaphores
-#my $sem_key = IPC_PRIVATE; # Private key for IPC
-my $sem_key = 'jobrun-semkey'; # Private key for IPC
-my $sem = IPC::Semaphore->new($sem_key, 2, S_IRUSR | S_IWUSR | IPC_CREAT | SEM_UNDO) or die "Unable to create semaphore: $!";
+#my $semKey = IPC_PRIVATE; # Private key for IPC
+# sem key must be numeric
+my $semKey = 51853289;
+my $sem = IPC::Semaphore->new($semKey, 2, S_IRUSR | S_IWUSR | IPC_CREAT | SEM_UNDO) or die "Unable to create semaphore: $!";
 
 # Initialize semaphore values
 $sem->setval(SEM_CHILD_COUNT, 0);
