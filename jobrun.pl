@@ -206,7 +206,8 @@ while(1) {
 		$jobs{$currJobName} = Jobrun->new(
 			JOBNAME => $currJobName, 
 			CMD => "$jobsToRun{$currJobName}",
-			LOGGER => \&logger,
+			LOGFH => $logFileFH,
+			VERBOSE => $config{verbose}
 		);
 		logger($logFileFH,$config{verbose}, "JOB: $currJobName: $jobsToRun{$currJobName}\n");
 		$jobs{$currJobName}->child();
