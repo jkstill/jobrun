@@ -9,7 +9,10 @@
 
 =head1 Jobrun.pm
 
-Not yet documented
+TODO
+
+Sometimes the IPC cleanup leaves behind a semaphore array and maybe a tied hash in memory
+This does not happen consistently, and I do not yet know why it happens at all
 
 =cut
 
@@ -18,8 +21,8 @@ package Jobrun;
 
 use warnings;
 use strict;
-use IPC::Semaphore;
 use IPC::SysV qw(IPC_PRIVATE SEM_UNDO IPC_CREAT S_IRUSR S_IWUSR);
+use IPC::Semaphore;
 use Data::Dumper;
 use File::Temp qw/ :seekable tmpnam/;
 #use Time::HiRes qw( usleep );
@@ -35,6 +38,7 @@ our $VERSION = '0.01';
 
 #use POSIX qw( ENOTCONN ECONNREFUSED ECONNRESET EINPROGRESS EWOULDBLOCK EAGAIN WNOHANG );
 
+# 'exclusive => 0' allows using 'jobrun.pl --kill'
 my %shmOptions = (
    create    => 1,
    exclusive => 0,
@@ -42,20 +46,22 @@ my %shmOptions = (
    destroy   => 1
 );
 
-my $jobPidsSHMKey = 'jobpid';
-my $completedJobsSHMKey  = 'completed-id';
-my $pidTreeSSHMKey = 'pidtree';
+my $tieType='IPC::Shareable';
+
+$shmOptions{key}='jobpid';
 our %jobPids=();
-tie %jobPids, 'IPC::Shareable', $jobPidsSHMKey, { %shmOptions } or die "tie failed jobPids - $!\n";
+tie %jobPids, $tieType, \%shmOptions or die "tie failed jobPids - $!\n";
 
 our %completedJobs=();
-tie %completedJobs, 'IPC::Shareable', $completedJobsSHMKey, { %shmOptions } or die "tie failed %completedJobs= - $!\n";
+$shmOptions{key}='completed-id';
+tie %completedJobs, $tieType, \%shmOptions or die "tie failed %completedJobs= - $!\n";
 
 # %allJobs used when creating resumable file
 our %allJobs;
 # %pidTree used to track if jobs completed when eix
 our %pidTree;
-tie %pidTree, 'IPC::Shareable', $pidTreeSSHMKey, { %shmOptions } or die "tie failed %pidTree= - $!\n";
+$shmOptions{key}='pidtree';
+tie %pidTree, $tieType, \%shmOptions or die "tie failed %pidTree= - $!\n";
 
 use constant {
     SEM_CHILD_COUNT => 0, # Index for child count semaphore
@@ -64,8 +70,9 @@ use constant {
 
 
 # Create semaphores
-my $sem_key = IPC_PRIVATE; # Private key for IPC
-my $sem = IPC::Semaphore->new($sem_key, 2, S_IRUSR | S_IWUSR | IPC_CREAT) or die "Unable to create semaphore: $!";
+#my $sem_key = IPC_PRIVATE; # Private key for IPC
+my $sem_key = 'jobrun-semkey'; # Private key for IPC
+my $sem = IPC::Semaphore->new($sem_key, 2, S_IRUSR | S_IWUSR | IPC_CREAT | SEM_UNDO) or die "Unable to create semaphore: $!";
 
 # Initialize semaphore values
 $sem->setval(SEM_CHILD_COUNT, 0);
@@ -92,12 +99,6 @@ sub new {
    #print 'Sqlrun::new retval: ' . Dumper($retval);
    return $retval;
 }
-
-#sub childCleanup {
-	#my ($pid) = @_;
-	# see cleanup in jobrun.pl
-	# also loop through %jobPids and check for those
-#}
 
 sub lock {
     # Wait for lock to become available and decrement it
@@ -135,14 +136,17 @@ sub getChildrenCount {
 sub cleanup {
 	# This should be called to cleanup semaphores, typically on program exit
 	# or when the job engine dies unexpectedly.
+	warn "Jobrun::cleanup()\n";
 	lock();
 	$sem->setval(SEM_CHILD_COUNT, 0);
 	$sem->setval(SEM_LOCK, 1);
 	unlock();
 	$sem->remove();
-	undef %jobPids;
-	undef %completedJobs;
-	undef %pidTree;
+
+	(tied %completedJobs)->remove();
+	(tied %pidTree)->remove();
+	(tied %jobPids)->remove();
+	IPC::Shareable->clean_up_all();
 	return;
 }
 
@@ -210,7 +214,7 @@ sub child {
 	die("Can't fork #1: $!") unless defined($child);
 
 	if ($child) {
-		$self->{LOGGER}( "child:$$  cmd:$self->{CMD}\n");
+		logger($self->{LOGFH},$self->{VERBOSE},"child:$$  cmd:$self->{CMD}\n");
 
 	} else {
 		my $parentPID=$$;
@@ -225,28 +229,28 @@ sub child {
 
 			$jobPids{$self->{JOBNAME}} = "$pid:running";
 
-			$self->{LOGGER}( "grandChild:$pid:running\n");
+			logger($self->{LOGFH},$self->{VERBOSE}, "grandChild:$pid:running\n");
 			#
-			$self->{LOGGER} ( "grancChild:$pid running job $self->{JOBNAME}\n");
+			logger($self->{LOGFH} ,$self->{VERBOSE}, "grancChild:$pid running job $self->{JOBNAME}\n");
 			system($self->{CMD});
 			my $rc = $?;
 
 			if ( $rc != 0 ) {
-				$self->{LOGGER} ("#######################################\n");
-				$self->{LOGGER} ("## error with $self->{JOBNAME}\n");
-				$self->{LOGGER} ("## CMD: $self->{CMD}\n");
-				$self->{LOGGER} ("#######################################\n");
+				logger($self->{LOGFH},$self->{VERBOSE}, "#######################################\n");
+				logger($self->{LOGFH},$self->{VERBOSE}, "## error with $self->{JOBNAME}\n");
+				logger($self->{LOGFH},$self->{VERBOSE}, "## CMD: $self->{CMD}\n");
+				logger($self->{LOGFH},$self->{VERBOSE}, "#######################################\n");
 			}
 
 			if ($rc == -1) {
-				$self->{LOGGER} ("!!failed to execute: $!\n");
+				logger($self->{LOGFH},$self->{VERBOSE}, "!!failed to execute: $!\n");
 			}
 			elsif ($rc & 127) {
-				$self->{LOGGER} (sprintf "!!child died with signal %d, %s coredump\n",
+				logger($self->{LOGFH},$self->{VERBOSE}, sprintf "!!child died with signal %d, %s coredump\n",
 					($rc & 127),  ($rc & 128) ? 'with' : 'without');
 			}
 			else {
-				$self->{LOGGER} (sprintf "!!child exited with value %d\n", $? >> 8);
+				logger($self->{LOGFH},$self->{VERBOSE}, sprintf "!!child exited with value %d\n", $? >> 8);
 			}
 	
 			decrementChildren();

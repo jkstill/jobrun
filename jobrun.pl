@@ -23,6 +23,7 @@ use Getopt::Long qw(:config pass_through) ;
 use lib './lib';
 use Jobrun qw(logger %allJobs);
 use sigtrap 'handler', sub{ cleanup(); exit; }, qw(QUIT TERM);
+use IPC::Shareable;
 
 # seem comments later about using signals to run code
 # does not seem to work in a useful manner
@@ -146,8 +147,8 @@ if ( $exitNow ) {
 	my $childrenHash = Jobrun::getJobPids();
 	my @childPids = map { (split(/:/,$childrenHash->{$_}))[0] }  keys %{$childrenHash};
 	print 'ChildPIDs: ' . Dumper(\@childPids);
-	kill '-TERM', @childPids;
-	kill '-TERM', $mainPID;
+	kill '-QUIT', @childPids;
+	kill '-QUIT', $mainPID;
 	unlink 'jobrun.pid';
 	exit 0;
 }
