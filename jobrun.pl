@@ -257,6 +257,32 @@ sub cleanup {
 	print "Current Children: " . Jobrun::getChildrenCount() . "\n";
 	logger($logFileFH,$config{verbose},"parent:$$ Current Children after wait: " . Jobrun::getChildrenCount() . "\n");
 
+	logger($logFileFH,$config{verbose},"All PIDs:\n" .  Dumper(\%Jobrun::jobPids));
+
+	# check status - should not be any other than 'complete'
+	# even though getChildreCount() is 0, there may be some jobs that are not complete
+	# this may be due to IPC::Shareable not being able to keep up for some reason.
+	my $failsafe = 0;
+	while (1) {
+
+		my $exitOK = 1;
+
+		foreach my $jobPid ( keys %Jobrun::jobPids ) {
+
+			my ($pid,$status) = split(/:/,$Jobrun::jobPids{$jobPid});
+
+			if ( $status ne 'complete' ) {
+				$exitOK = 0;
+				logger($logFileFH,$config{verbose},"parent:$$ " . "main: job $jobPid not complete - status: $status\n");
+				print "Job $jobPid not complete - status: $status\n";
+			}
+		}
+
+		last if $exitOK;
+		last if $failsafe++ > 20;
+		sleep $config{'iteration-seconds'};
+	}
+
 	logger($logFileFH,$config{verbose},"parent:$$\n" . '%pidTree cleanup before: ' . Dumper(\%Jobrun::pidTree));
 	print '%pidTree cleanup before: ' . Dumper(\%Jobrun::pidTree);
 
