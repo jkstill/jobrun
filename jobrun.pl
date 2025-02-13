@@ -25,6 +25,10 @@ use Jobrun qw(logger %allJobs);
 use sigtrap 'handler', sub{ cleanup(); exit; }, qw(QUIT TERM);
 use IPC::Shareable;
 
+$Data::Dumper::Terse = 1; # to Eval whole thing as a hash
+$Data::Dumper::Indent = 1; # Looks better, just a preference
+$Data::Dumper::Sortkeys = 1; # To keep changes minimal in source control
+
 # seem comments later about using signals to run code
 # does not seem to work in a useful manner
 # I think what happens is the current call gets interrupted by the signal,
@@ -177,6 +181,8 @@ my ($sec,$min,$hour,$mday,$mon,$year,$wday,$yday,$isdst) = localtime(time);
 my $logFile="$config{'logdir'}/$config{'logfile-base'}-${year}-${mon}-${mday}_${hour}-${min}-${sec}.$config{'logfile-suffix'}";
 my $logFileFH = IO::File->new($logFile,'w') or die "cannot open $logFile for write - $!\n";;
 $|=1; # no buffer on output
+autoflush STDOUT 1;
+
 logger($logFileFH,$config{verbose},"==============================================================\n");
 
 my @jobQueue = keys %jobsToRun;
@@ -231,6 +237,7 @@ showKV(\%config);
 banner('#',80,"\%jobsToRun - $jobFile");
 showKV(\%jobsToRun);
 
+
 cleanup();
 exit;
 
@@ -241,18 +248,30 @@ exit;
 
 sub cleanup {
 	# wait for jobs to finish
+	print "Current Children: " . Jobrun::getChildrenCount() . "\n";
+	logger($logFileFH,$config{verbose},"parent:$$ Current Children: " . Jobrun::getChildrenCount() . "\n");
 	while ( Jobrun::getChildrenCount() > 0 ) {
 		logger($logFileFH,$config{verbose},"parent:$$ " . "main: waiting for children to complete\n");
 		sleep $config{'iteration-seconds'};
 	}
+	print "Current Children: " . Jobrun::getChildrenCount() . "\n";
+	logger($logFileFH,$config{verbose},"parent:$$ Current Children after wait: " . Jobrun::getChildrenCount() . "\n");
 
-	print '%pidTree cleanup: ' . Dumper(\%Jobrun::pidTree);
+	logger($logFileFH,$config{verbose},"parent:$$\n" . '%pidTree cleanup before: ' . Dumper(\%Jobrun::pidTree));
+	print '%pidTree cleanup before: ' . Dumper(\%Jobrun::pidTree);
 
-	Jobrun::showCompletedJobs();
+	logger($logFileFH,$config{verbose},"All Jobs:\n" .  Dumper(\%Jobrun::allJobs));
+	logger($logFileFH,$config{verbose},"Completed Jobs:\n" .  Dumper(\%Jobrun::completedJobs));
+	logger($logFileFH,$config{verbose},"Jobs Status:\n" .  Dumper(\%Jobrun::jobPids));
+
+
 	Jobrun::createResumableFile($resumableFile) if $resumable;
 	# remove resumable file if it exists and is 0 bytes
 	Jobrun::cleanupResumableFile($resumableFile);
 	Jobrun::cleanup(); # Note: This will remove the semaphore. Only call this when absolutely necessary.
+
+	logger($logFileFH,$config{verbose},"parent:$$\n" . '%pidTree cleanup after ' . Dumper(\%Jobrun::pidTree));
+	print '%pidTree cleanup after ' . Dumper(\%Jobrun::pidTree);
 
 	if ( -w 'jobrun.pid' ) {
 		unlink 'jobrun.pid;'

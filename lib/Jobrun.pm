@@ -137,7 +137,7 @@ sub getChildrenCount {
 sub cleanup {
 	# This should be called to cleanup semaphores, typically on program exit
 	# or when the job engine dies unexpectedly.
-	warn "Jobrun::cleanup()\n";
+	warn "Jobrun::cleanup() running\n";
 	lock();
 	$sem->setval(SEM_CHILD_COUNT, 0);
 	$sem->setval(SEM_LOCK, 1);
@@ -254,9 +254,14 @@ sub child {
 				logger($self->{LOGFH},$self->{VERBOSE}, sprintf "!!child exited with value %d\n", $? >> 8);
 			}
 	
-			decrementChildren();
+			# there seems to be a race condition here
+			# jobrun.pl will check for children, and if none are found, it does cleanup
+			# however, the child may not have had time to update the semaphore and the status
+			# so the driver (jobrun.pl) will create the 'resumable' file, even though the completed
+			# fix this by putting the decrement call after the status update
 			$jobPids{$self->{JOBNAME}} = "$pid:complete";
 			$completedJobs{$self->{JOBNAME}} = $self->{CMD};
+			decrementChildren();
 			delete $pidTree{$grantParentPID}->{$parentPID};
 			exit $rc;
 		} else {
