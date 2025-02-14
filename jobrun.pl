@@ -229,8 +229,6 @@ while(1) {
 	logger($logFileFH,$config{verbose},"parent:$$ child count " . Jobrun::getChildrenCount() . "\n");
 	last if $numberJobsToRun < 1;
 
-	logger($logFileFH,$config{verbose}, '%pidTree: ' . Dumper(\%Jobrun::pidTree));
-	
 	sleep $config{'iteration-seconds'};
 }
 
@@ -262,10 +260,6 @@ sub cleanup {
 	logger($logFileFH,$config{verbose},"parent:$$ Current Children after wait: " . Jobrun::getChildrenCount() . "\n");
 
 	logger($logFileFH,$config{verbose},"All PIDs:\n" .  Dumper(\%Jobrun::jobPids));
-
-	# check if any are still running
-	my $user = getpwuid($$);
-	my $uid = getpwnam($user);
 
 	my @jobrunPids = ();
 	foreach my $jobPid ( keys %Jobrun::jobPids ) {
@@ -324,9 +318,6 @@ sub cleanup {
 	# tie is just too slow
 	# consider using sqlite, or maybe CSV with SQL, as there will never be more than a few thousand records
 
-	logger($logFileFH,$config{verbose},"parent:$$\n" . '%pidTree cleanup before: ' . Dumper(\%Jobrun::pidTree));
-	print '%pidTree cleanup before: ' . Dumper(\%Jobrun::pidTree);
-
 	logger($logFileFH,$config{verbose},"All Jobs:\n" .  Dumper(\%Jobrun::allJobs));
 	logger($logFileFH,$config{verbose},"Completed Jobs:\n" .  Dumper(\%Jobrun::completedJobs));
 	logger($logFileFH,$config{verbose},"Jobs Status:\n" .  Dumper(\%Jobrun::jobPids));
@@ -335,9 +326,6 @@ sub cleanup {
 	# remove resumable file if it exists and is 0 bytes
 	Jobrun::cleanupResumableFile($resumableFile);
 	Jobrun::cleanup(); # Note: This will remove the semaphore. Only call this when absolutely necessary.
-
-	logger($logFileFH,$config{verbose},"parent:$$\n" . '%pidTree cleanup after ' . Dumper(\%Jobrun::pidTree));
-	print '%pidTree cleanup after ' . Dumper(\%Jobrun::pidTree);
 
 	if ( -w 'jobrun.pid' ) {
 		unlink 'jobrun.pid;'

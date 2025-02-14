@@ -27,6 +27,7 @@ use Data::Dumper;
 use File::Temp qw/ :seekable tmpnam/;
 #use Time::HiRes qw( usleep );
 use IPC::Shareable;
+use DBI;
 use IO::File;
 use lib '.';
 
@@ -58,10 +59,6 @@ tie %completedJobs, $tieType, \%shmOptions or die "tie failed %completedJobs= - 
 
 # %allJobs used when creating resumable file
 our %allJobs;
-# %pidTree used to track if jobs completed when eix
-our %pidTree;
-$shmOptions{key}='pidtree';
-tie %pidTree, $tieType, \%shmOptions or die "tie failed %pidTree= - $!\n";
 
 use constant {
     SEM_CHILD_COUNT => 0, # Index for child count semaphore
@@ -145,7 +142,6 @@ sub cleanup {
 	$sem->remove();
 
 	(tied %completedJobs)->remove();
-	(tied %pidTree)->remove();
 	(tied %jobPids)->remove();
 	IPC::Shareable->clean_up_all();
 	return;
@@ -226,7 +222,6 @@ sub child {
 			# use system() here
 			#qx/$cmd/;
 			my $pid=$$;
-			$pidTree{$grantParentPID}->{$parentPID}=$pid;
 
 			$jobPids{$self->{JOBNAME}} = "$pid:running";
 
@@ -267,7 +262,6 @@ sub child {
 			$completedJobs{$self->{JOBNAME}} = $self->{CMD};
 			logger($self->{LOGFH},$self->{VERBOSE}, "just updated completedJobs{$self->{JOBNAME}} = $self->{CMD}\n");
 			decrementChildren();
-			delete $pidTree{$grantParentPID}->{$parentPID};
 			exit $rc;
 		} else {
 			exit 0;
