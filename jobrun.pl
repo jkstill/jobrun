@@ -24,6 +24,8 @@ use lib './lib';
 use Jobrun qw(logger %allJobs);
 use sigtrap 'handler', sub{ cleanup(); exit; }, qw(QUIT TERM);
 use IPC::Shareable;
+use Proc::ProcessTable;
+use List::Util qw(any);
 
 $Data::Dumper::Terse = 1; # to Eval whole thing as a hash
 $Data::Dumper::Indent = 1; # Looks better, just a preference
@@ -248,6 +250,8 @@ exit;
 
 sub cleanup {
 	# wait for jobs to finish
+	my $sleepTime = 5;
+
 	print "Current Children: " . Jobrun::getChildrenCount() . "\n";
 	logger($logFileFH,$config{verbose},"parent:$$ Current Children: " . Jobrun::getChildrenCount() . "\n");
 	while ( Jobrun::getChildrenCount() > 0 ) {
@@ -259,29 +263,66 @@ sub cleanup {
 
 	logger($logFileFH,$config{verbose},"All PIDs:\n" .  Dumper(\%Jobrun::jobPids));
 
-	# check status - should not be any other than 'complete'
-	# even though getChildreCount() is 0, there may be some jobs that are not complete
-	# this may be due to IPC::Shareable not being able to keep up for some reason.
-	my $failsafe = 0;
+	# check if any are still running
+	my $user = getpwuid($$);
+	my $uid = getpwnam($user);
+
+	my @jobrunPids = ();
+	foreach my $jobPid ( keys %Jobrun::jobPids ) {
+		my ($pid,$status) = split(/:/,$Jobrun::jobPids{$jobPid});
+		push @jobrunPids, $pid;
+	}
+
 	while (1) {
+		my %userPids = getPidsByList(\@jobrunPids);
 
-		my $exitOK = 1;
+		print Dumper(\%userPids);
 
-		foreach my $jobPid ( keys %Jobrun::jobPids ) {
-
-			my ($pid,$status) = split(/:/,$Jobrun::jobPids{$jobPid});
-
-			if ( $status ne 'complete' ) {
-				$exitOK = 0;
-				logger($logFileFH,$config{verbose},"parent:$$ " . "main: job $jobPid not complete - status: $status\n");
-				print "Job $jobPid not complete - status: $status\n";
+		if ( scalar keys %userPids == 0 ) {
+			print "All processes have completed\n";
+			last;
+		} else {
+			print "Some processes are still running\n";
+			foreach my $pid ( keys %userPids ) {
+				print "PID: $pid - $userPids{$pid}\n";
 			}
 		}
-
-		last if $exitOK;
-		last if $failsafe++ > 20;
-		sleep $config{'iteration-seconds'};
+		sleep $sleepTime;
 	}
+
+	# There is either a bug in Jobrun.pm, or some unknown issue with tied hashes
+	# Even though logging shows all children updated their status, the tied hash does not reflect this
+	# so I will do a manual cleanup here	
+	# I know that the jobs have completed, as the previous block of code verifies the PIDs are no longer running
+   # make surece the %completedJobs hash is updated
+	foreach my $jobName ( keys %Jobrun::allJobs ) {
+
+		my ($pid,$status) = split(/:/,$Jobrun::jobPids{$jobName});
+
+		if ( ! exists $Jobrun::completedJobs{$jobName} ) {
+			$Jobrun::completedJobs{$jobName} = "$pid: completed by cleanup";
+		}
+
+		if ($Jobrun::jobPids{$jobName} =~ /$pid:running/ ) {
+			$Jobrun::jobPids{$jobName} = "$pid:complete";
+		}
+	}
+	
+	# sleep for a few seconds, as the tied hashes may not be updated immediately
+	# A lot of effort has been put into troubleshooting why some jobs are not updating their status
+	# The jobs _are_ updating status, as shown by the log files
+	# The issue is that the tied hashes are not updating immediately
+	# The sleep did not completely fix the problem.
+	# I can seen from the console output that some are still shown as running
+	# but the log files show they have completed
+	# But, after the sleep, the resumable file is sometimes created, sometimes not
+	# I am not sure what is going on here
+	#sleep 10;	
+	##
+	# this has me rethinking the use of tied hashes to store the job status,etc.
+	# see https://www.reddit.com/r/perl/comments/18pda43/speed_of_tie/
+	# tie is just too slow
+	# consider using sqlite, or maybe CSV with SQL, as there will never be more than a few thousand records
 
 	logger($logFileFH,$config{verbose},"parent:$$\n" . '%pidTree cleanup before: ' . Dumper(\%Jobrun::pidTree));
 	print '%pidTree cleanup before: ' . Dumper(\%Jobrun::pidTree);
@@ -289,7 +330,6 @@ sub cleanup {
 	logger($logFileFH,$config{verbose},"All Jobs:\n" .  Dumper(\%Jobrun::allJobs));
 	logger($logFileFH,$config{verbose},"Completed Jobs:\n" .  Dumper(\%Jobrun::completedJobs));
 	logger($logFileFH,$config{verbose},"Jobs Status:\n" .  Dumper(\%Jobrun::jobPids));
-
 
 	Jobrun::createResumableFile($resumableFile) if $resumable;
 	# remove resumable file if it exists and is 0 bytes
@@ -353,6 +393,66 @@ sub reloadConfig {
 	#$SIG{HUP} = \&reloadConfig; # kill -1
 	return;
 }
+
+sub havePidsCompleted {
+	my ($uid,$check) = @_;
+	my %userPids = getPidsByUID($uid,$check);
+	if ( scalar keys %userPids == 0 ) {
+		return 1;
+	} else {
+		return 0;
+	}
+}
+
+
+sub getPidsByUID {
+	my ($uid,$check) = @_;
+	my $t = Proc::ProcessTable->new(('enable_ttys' => 0,'cache_ttys' => 0));
+	my %pids;
+	foreach my $p ( @{$t->table} ){
+		next unless $p->uid == $uid;
+		if ( $p->cmndline =~ /$check/ ) {
+			$pids{$p->pid} = trim($p->cmndline);
+		}
+	}
+	return %pids;
+}
+
+sub getPidsByList {
+	my ($list) = @_;
+
+	my $t = Proc::ProcessTable->new(('enable_ttys' => 0,'cache_ttys' => 0));
+	my %pids;
+
+	foreach my $p ( @{$t->table} ){
+		$pids{$p->pid} = trim($p->cmndline);
+	}
+
+	my %targetPids;
+	foreach my $pid ( @{$list} ) {
+		if ( any { $_ == $pid } keys %pids) {
+			$targetPids{$pid} = $pids{$pid};
+		}
+	}
+
+	return %targetPids;
+}
+
+sub trim {
+	my $str = shift;
+	$str =~ s/^\s+//;
+	$str =~ s/\s+$//;
+	return $str;
+}
+
+sub stillRunning {
+	my $pid = shift;
+	return kill 0, $pid;
+}
+
+
+
+
 
 sub usage {
    my $exitVal = shift;

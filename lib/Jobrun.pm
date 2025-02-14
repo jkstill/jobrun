@@ -243,15 +243,18 @@ sub child {
 				logger($self->{LOGFH},$self->{VERBOSE}, "#######################################\n");
 			}
 
+			my $jobStatus = 'complete';
 			if ($rc == -1) {
+				$jobStatus = 'failed';
 				logger($self->{LOGFH},$self->{VERBOSE}, "!!failed to execute: $!\n");
 			}
 			elsif ($rc & 127) {
-				logger($self->{LOGFH},$self->{VERBOSE}, sprintf "!!child died with signal %d, %s coredump\n",
+				$jobStatus = 'error';
+				logger($self->{LOGFH},$self->{VERBOSE}, sprintf "!!child $pid died with signal %d, %s coredump\n",
 					($rc & 127),  ($rc & 128) ? 'with' : 'without');
 			}
 			else {
-				logger($self->{LOGFH},$self->{VERBOSE}, sprintf "!!child exited with value %d\n", $? >> 8);
+				logger($self->{LOGFH},$self->{VERBOSE}, sprintf "!!child $pid exited with value %d\n", $? >> 8);
 			}
 	
 			# there seems to be a race condition here
@@ -259,8 +262,10 @@ sub child {
 			# however, the child may not have had time to update the semaphore and the status
 			# so the driver (jobrun.pl) will create the 'resumable' file, even though the completed
 			# fix this by putting the decrement call after the status update
-			$jobPids{$self->{JOBNAME}} = "$pid:complete";
+			$jobPids{$self->{JOBNAME}} = "$pid:$jobStatus";
+			logger($self->{LOGFH},$self->{VERBOSE}, "just updated jobPids{$self->{JOBNAME}} = $pid:$jobStatus\n");
 			$completedJobs{$self->{JOBNAME}} = $self->{CMD};
+			logger($self->{LOGFH},$self->{VERBOSE}, "just updated completedJobs{$self->{JOBNAME}} = $self->{CMD}\n");
 			decrementChildren();
 			delete $pidTree{$grantParentPID}->{$parentPID};
 			exit $rc;
