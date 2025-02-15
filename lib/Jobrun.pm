@@ -65,6 +65,41 @@ use constant {
     SEM_LOCK => 1,        # Index for lock semaphore
 };
 
+## transition from tied hash to CSV file and SQL
+our $controlTable = 'jobrun_control';
+
+our $dbh = DBI->connect ("dbi:CSV:", undef, undef, {
+	f_ext      => ".csv/r",
+	RaiseError => 1,
+}) or die "Cannot connect: $DBI::errstr";
+
+# Create the table
+eval {
+	local $dbh->{RaiseError} = 1;
+	local $dbh->{PrintError} = 0;
+
+	$dbh->do ("DROP TABLE $controlTable");
+	die "Cannot drop table: $DBI::errstr" if $DBI::err;
+};
+
+if ($@) {
+	#print "Error!: $@\n";
+	#print "Table most likely does not exist\n";
+	print "Creating table\n";
+} else {
+	print "Table dropped\n";
+}
+
+$dbh->do (
+qq{CREATE TABLE $controlTable (
+	name CHAR(50)
+	, pid CHAR(12)
+	, cmd CHAR(200)
+	, status CHAR(20)
+	, exit_code CHAR(10))
+}
+);
+
 
 # Create semaphores
 #my $semKey = IPC_PRIVATE; # Private key for IPC
