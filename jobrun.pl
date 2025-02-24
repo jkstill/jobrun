@@ -263,10 +263,6 @@ sub cleanup {
 
 	logger($logFileFH,$config{verbose},"All PIDs:\n" .  Dumper(\%Jobrun::jobPids));
 
-	# check if any are still running
-	my $user = getpwuid($$);
-	my $uid = getpwnam($user);
-
 	my @jobrunPids = ();
 	foreach my $jobPid ( keys %Jobrun::jobPids ) {
 		my ($pid,$status) = split(/:/,$Jobrun::jobPids{$jobPid});
@@ -392,30 +388,6 @@ sub reloadConfig {
 	getKV($configFile,\%config);
 	#$SIG{HUP} = \&reloadConfig; # kill -1
 	return;
-}
-
-sub havePidsCompleted {
-	my ($uid,$check) = @_;
-	my %userPids = getPidsByUID($uid,$check);
-	if ( scalar keys %userPids == 0 ) {
-		return 1;
-	} else {
-		return 0;
-	}
-}
-
-
-sub getPidsByUID {
-	my ($uid,$check) = @_;
-	my $t = Proc::ProcessTable->new(('enable_ttys' => 0,'cache_ttys' => 0));
-	my %pids;
-	foreach my $p ( @{$t->table} ){
-		next unless $p->uid == $uid;
-		if ( $p->cmndline =~ /$check/ ) {
-			$pids{$p->pid} = trim($p->cmndline);
-		}
-	}
-	return %pids;
 }
 
 sub getPidsByList {
