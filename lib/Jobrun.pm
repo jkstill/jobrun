@@ -66,39 +66,99 @@ use constant {
 };
 
 ## transition from tied hash to CSV file and SQL
+our $tableDir = './tables';
+mkdir $tableDir unless -d $tableDir;
+-d $tableDir or die "table directory $tableDir not created: $!\n";
+
 our $controlTable = 'jobrun_control';
+#our $dbh;
 
-our $dbh = DBI->connect ("dbi:CSV:", undef, undef, {
-	f_ext      => ".csv/r",
-	RaiseError => 1,
-}) or die "Cannot connect: $DBI::errstr";
+createTable();
+truncateTable();
 
-# Create the table
-eval {
-	local $dbh->{RaiseError} = 1;
-	local $dbh->{PrintError} = 0;
+sub createDbConnection {
+	my $dbh = DBI->connect ("dbi:CSV:", undef, undef, 
+		{
+			f_ext      => ".csv",
+			f_dir      => $tableDir,
+			flock      => 2,
+			RaiseError => 1,
+		}
+	) or die "Cannot connect: $DBI::errstr";
 
-	$dbh->do ("DROP TABLE $controlTable");
-	die "Cannot drop table: $DBI::errstr" if $DBI::err;
-};
-
-if ($@) {
-	#print "Error!: $@\n";
-	#print "Table most likely does not exist\n";
-	print "Creating table\n";
-} else {
-	print "Table dropped\n";
+	return $dbh;
 }
 
-$dbh->do (
-qq{CREATE TABLE $controlTable (
-	name CHAR(50)
-	, pid CHAR(12)
-	, cmd CHAR(200)
-	, status CHAR(20)
-	, exit_code CHAR(10))
+sub createTable {
+	my $dbh = createDbConnection();
+
+	# create table if it does not exist
+	eval {
+		local $dbh->{RaiseError} = 1;
+		local $dbh->{PrintError} = 0;
+
+		$dbh->do (
+			qq{CREATE TABLE $controlTable (
+				name CHAR(50)
+				, pid CHAR(12)
+				, cmd CHAR(200)
+				, status CHAR(20)
+				, exit_code CHAR(10))
+			}
+		);
+	
+	};
+
+	#if ($@) {
+	#print "Error: $@\n";
+	#print "Table most likely already exists\n";
+	#}
+
+	return;
 }
-);
+
+sub truncateTable {
+	my $dbh = createDbConnection();
+	$dbh->do("DELETE FROM $controlTable");
+	return;
+}
+
+
+sub insertTable {
+	my $self = shift;
+	print 'insertTable SELF: ' . Dumper($self);
+	my $dbh = $self->{dbh};
+	my ($name,$pid,$cmd,$status,$exit_code) = @_;
+	my $sth = $dbh->prepare("INSERT INTO $controlTable (name,pid,cmd,status,exit_code) VALUES (?,?,?,?,?)");
+	$sth->execute($name,$pid,$cmd,$status,$exit_code);
+}
+
+sub deleteTable {
+	my $self = shift;
+	my $dbh = $self->{dbh};
+	my ($name) = @_;
+	my $sth = $dbh->prepare("DELETE FROM $controlTable WHERE name = ?");
+	$sth->execute($name);
+}
+
+sub selectTable {
+	my $self = shift;
+	my $dbh = $self->{dbh};
+	my ($name) = @_;
+	my $sth = $dbh->prepare("SELECT * FROM $controlTable WHERE name = ?");
+	$sth->execute($name);
+	my $row = $sth->fetchrow_hashref;
+	return $row;
+}
+
+# only updates status and exit_code
+sub updateTable {
+	my $self = shift;
+	my $dbh = $self->{dbh};
+	my ($name,$status,$exit_code) = @_;
+	my $sth = $dbh->prepare("UPDATE $controlTable SET status = ?, exit_code = ? WHERE name = ?");
+	$sth->execute($status,$exit_code,$name);
+}
 
 
 # Create semaphores
@@ -127,9 +187,36 @@ sub new {
    my $class = ref($pkg) || $pkg;
    #print "Class: $class\n";
    my (%args) = @_;
+	
+	$args{dbh} = createDbConnection();
+	
+	# this needs some code to cleanup the table at the start of the program
+	# before new() is called
+	# and at the end, in cleanup
+	# Maybe both should be before new() is called
+	#createTable($args{dbh});
+
+	$args{insert} = \&insertTable;
+	$args{update} = \&updateTable;
+	$args{delete} = \&deleteTable;
+	$args{select} = \&selectTable;
+
+	# name,pid,cmd,status,exit_code) VALUES (?,?,?,?,?)");
+	
+	$args{columnNamesByName} = { name => 0, pid => 1, cmd => 2,  status => 3, exit_code => 4};
+	$args{columnNamesByIndex} = { 0 => 'name', 1 => 'pid', 2 => 'cmd', 3 => 'status', 4 => 'exit_code'};
+	$args{columnValues} = [qw/undef undef undef undef undef/];
+
+	my ($user,$passwd,$uid,$gid,$quota,$comment,$gcos,$dir,$shell,$expire)
+   	= getpwuid($<) or die "getpwuid: $!";
+	print "User: $user, UID: $uid\n";
 
    my $retval = bless \%args, $class;
-   #print 'Sqlrun::new retval: ' . Dumper($retval);
+
+	#print 'retval: ' . Dumper($retval);
+	$retval->{insert}($retval,$retval->{JOBNAME},$$,$retval->{CMD},'running','NA');
+	#$args{insert}($args{JOBNAME},$$,$args{CMD},'running','NA');
+	#exit;
    return $retval;
 }
 
@@ -295,6 +382,8 @@ sub child {
 			$jobPids{$self->{JOBNAME}} = "$pid:$jobStatus";
 			logger($self->{LOGFH},$self->{VERBOSE}, "just updated jobPids{$self->{JOBNAME}} = $pid:$jobStatus\n");
 			$completedJobs{$self->{JOBNAME}} = $self->{CMD};
+			# it should not be necessary to pass $self here, not sure yet why it is necessary
+			$self->{update}($self,$self->{JOBNAME},$jobStatus,$rc);
 			logger($self->{LOGFH},$self->{VERBOSE}, "just updated completedJobs{$self->{JOBNAME}} = $self->{CMD}\n");
 			decrementChildren();
 			exit $rc;
