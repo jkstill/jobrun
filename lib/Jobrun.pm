@@ -189,12 +189,12 @@ sub status {
 	my $dbh = createDbConnection();
 	my $sth = $dbh->prepare("SELECT * FROM $controlTable");
 	$sth->execute();
-	printf "%-$config{colLenNAME}s %-$config{colLenPID}s %-$config{colLenCMD}s %-$config{colLenSTATUS}s %-$config{colLenEXIT_CODE}s\n", 'name', 'pid', 'cmd', 'status', 'exit_code';
-	printf "%-$config{colLenNAME}s %-$config{colLenPID}s %-$config{colLenCMD}s %-$config{colLenSTATUS}s %-$config{colLenEXIT_CODE}s\n", 
-		'-' x $config{colLenNAME}, '-' x $config{colLenPID}, '-' x $config{colLenCMD}, '-' x $config{colLenSTATUS}, '-' x $config{colLenEXIT_CODE};
+	printf "%-$config{colLenNAME}s %-$config{colLenPID}s %-$config{colLenSTATUS}s %-$config{colLenEXIT_CODE}s %-$config{colLenCMD}s\n", 'name', 'pid','status', 'exit_code', 'cmd';
+	printf "%-$config{colLenNAME}s %-$config{colLenPID}s %-$config{colLenSTATUS}s %-$config{colLenEXIT_CODE}s %-$config{colLenCMD}s\n", 
+		'-' x $config{colLenNAME}, '-' x $config{colLenPID}, '-' x $config{colLenSTATUS}, '-' x $config{colLenEXIT_CODE}, '-' x $config{colLenCMD};
 	while (my $row = $sth->fetchrow_hashref) {
-		printf "%-$config{colLenNAME}s %-$config{colLenPID}s %-$config{colLenCMD}s %-$config{colLenSTATUS}s %-$config{colLenEXIT_CODE}s\n",
-			$row->{name}, $row->{pid}, $row->{cmd}, $row->{status}, $row->{exit_code};
+		printf "%-$config{colLenNAME}s %-$config{colLenPID}s %-$config{colLenSTATUS}s %-$config{colLenEXIT_CODE}s %-$config{colLenCMD}s\n",
+			$row->{name}, $row->{pid}, $row->{status}, $row->{exit_code}, $row->{cmd};
 	}
 	return;
 }
