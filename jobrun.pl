@@ -30,7 +30,7 @@ $Data::Dumper::Terse = 1; # to Eval whole thing as a hash
 $Data::Dumper::Indent = 1; # Looks better, just a preference
 $Data::Dumper::Sortkeys = 1; # To keep changes minimal in source control
 
-# seem comments later about using signals to run code
+# see comments later about using signals to run code
 # does not seem to work in a useful manner
 # I think what happens is the current call gets interrupted by the signal,
 # and the return is to whatever the following line of code is.
@@ -203,8 +203,6 @@ if ($debug) {
 }
 
 logger($logFileFH,$config{verbose}, "parent pid: $$\n:");
-#my $dummy=<STDIN>;
-#exit;
 
 # call this only once, as it will re-initialize the table
 Jobrun::init();
@@ -271,22 +269,6 @@ sub cleanup {
 		my ($pid,$status) = split(/:/,$Jobrun::jobPids{$jobPid});
 		push @jobrunPids, $pid;
 	}
-
-	# sleep for a few seconds, as the tied hashes may not be updated immediately
-	# A lot of effort has been put into troubleshooting why some jobs are not updating their status
-	# The jobs _are_ updating status, as shown by the log files
-	# The issue is that the tied hashes are not updating immediately
-	# The sleep did not completely fix the problem.
-	# I can seen from the console output that some are still shown as running
-	# but the log files show they have completed
-	# But, after the sleep, the resumable file is sometimes created, sometimes not
-	# I am not sure what is going on here
-	#sleep 10;	
-	##
-	# this has me rethinking the use of tied hashes to store the job status,etc.
-	# see https://www.reddit.com/r/perl/comments/18pda43/speed_of_tie/
-	# tie is just too slow
-	# consider using sqlite, or maybe CSV with SQL, as there will never be more than a few thousand records
 
 	logger($logFileFH,$config{verbose},"All Jobs:\n" .  Dumper(\%Jobrun::allJobs));
 	logger($logFileFH,$config{verbose},"Completed Jobs:\n" .  Dumper(\%Jobrun::completedJobs));
@@ -383,10 +365,6 @@ sub stillRunning {
 	return kill 0, $pid;
 }
 
-
-
-
-
 sub usage {
    my $exitVal = shift;
    $exitVal = 0 unless defined $exitVal;
@@ -431,7 +409,9 @@ Example:
 
  Pressing CTL-C will not stop jobrun, but it will print a status message.
 
- Pressing CTL-\ will kill the program and cleanup semaphores
+ Pressing CTL-\ should kill the program and children.
+
+ 'jorun.pl --kill' will kill the parent and children immediately if CTL-\ does not work.
 
  The config file can be reloaded by sending the HUP signal to the current jobrun.pl parent process.
 
@@ -455,7 +435,7 @@ Example:
 
  It may take a few moments for the chilren to die.
 
- The fastest method to stop jobrun is CTL-\
+ The fastest method to stop jobrun is 'jobrun.pl --kill'
 
 }  or  usage(1);
 

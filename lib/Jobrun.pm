@@ -95,7 +95,6 @@ sub truncateTable {
 	return;
 }
 
-
 sub insertTable {
 	my $self = shift;
 	print 'insertTable SELF: ' . Dumper($self);
@@ -191,7 +190,6 @@ sub status {
 	$sth->execute();
 	printf "%-20s %-12s %-50s %-20s %-10s\n", 'name', 'pid', 'cmd', 'status', 'exit_code';
 	while (my $row = $sth->fetchrow_hashref) {
-		#print "name: $row->{name} pid: $row->{pid} cmd: $row->{cmd} status: $row->{status} exit_code: $row->{exit_code}\n";
 		printf "%-20s %-12s %-50s %-20s %-10s\n",
 			$row->{name}, $row->{pid}, $row->{cmd}, $row->{status}, $row->{exit_code};
 	}
@@ -309,13 +307,6 @@ sub child {
 				logger($self->{LOGFH},$self->{VERBOSE}, sprintf "!!child $pid exited with value %d\n", $? >> 8);
 			}
 	
-			# there seems to be a race condition here
-			# jobrun.pl will check for children, and if none are found, it does cleanup
-			# however, the child may not have had time to update the semaphore and the status
-			# so the driver (jobrun.pl) will create the 'resumable' file, even though the completed
-			# fix this by putting the decrement call after the status update
-			#$jobPids{$self->{JOBNAME}} = "$pid:$jobStatus";
-			#logger($self->{LOGFH},$self->{VERBOSE}, "just updated jobPids{$self->{JOBNAME}} = $pid:$jobStatus\n");
 			$completedJobs{$self->{JOBNAME}} = $self->{CMD};
 			# it should not be necessary to pass $self here, not sure yet why it is necessary
 			$self->{update}($self,$self->{JOBNAME},$jobStatus,$rc);
