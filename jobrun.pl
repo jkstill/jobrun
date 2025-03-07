@@ -141,7 +141,7 @@ if ( $reloadConfigFile ) {
 
 if ( $getStatus ) {
 	# send HUP to pid of main process
-	Jobrun::status();
+	Jobrun::status(%config);
 	exit 0;
 }
 
@@ -251,13 +251,14 @@ exit;
 
 sub cleanup {
 	# wait for jobs to finish
-	my $sleepTime = 5;
+	my $sleepTime = 2;
 
 	print "Current Children: " . Jobrun::getChildrenCount() . "\n";
 	logger($logFileFH,$config{verbose},"parent:$$ Current Children: " . Jobrun::getChildrenCount() . "\n");
 	while ( Jobrun::getChildrenCount() > 0 ) {
 		logger($logFileFH,$config{verbose},"parent:$$ " . "main: waiting for children to complete\n");
-		sleep $config{'iteration-seconds'};
+		#sleep $config{'iteration-seconds'};
+		sleep $sleepTime;
 	}
 	print "Current Children: " . Jobrun::getChildrenCount() . "\n";
 	logger($logFileFH,$config{verbose},"parent:$$ Current Children after wait: " . Jobrun::getChildrenCount() . "\n");

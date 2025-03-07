@@ -185,12 +185,15 @@ sub getChildrenCount {
 }
 
 sub status {
+	my (%config) = @_;
 	my $dbh = createDbConnection();
 	my $sth = $dbh->prepare("SELECT * FROM $controlTable");
 	$sth->execute();
-	printf "%-20s %-12s %-50s %-20s %-10s\n", 'name', 'pid', 'cmd', 'status', 'exit_code';
+	printf "%-$config{colLenNAME}s %-$config{colLenPID}s %-$config{colLenCMD}s %-$config{colLenSTATUS}s %-$config{colLenEXIT_CODE}s\n", 'name', 'pid', 'cmd', 'status', 'exit_code';
+	printf "%-$config{colLenNAME}s %-$config{colLenPID}s %-$config{colLenCMD}s %-$config{colLenSTATUS}s %-$config{colLenEXIT_CODE}s\n", 
+		'-' x $config{colLenNAME}, '-' x $config{colLenPID}, '-' x $config{colLenCMD}, '-' x $config{colLenSTATUS}, '-' x $config{colLenEXIT_CODE};
 	while (my $row = $sth->fetchrow_hashref) {
-		printf "%-20s %-12s %-50s %-20s %-10s\n",
+		printf "%-$config{colLenNAME}s %-$config{colLenPID}s %-$config{colLenCMD}s %-$config{colLenSTATUS}s %-$config{colLenEXIT_CODE}s\n",
 			$row->{name}, $row->{pid}, $row->{cmd}, $row->{status}, $row->{exit_code};
 	}
 	return;
