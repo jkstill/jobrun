@@ -64,7 +64,13 @@ A test job.
 
 ### lib/Jobrun.pm
 
-Logic for controlling semaphores and job creation
+Logic for controlling jobs to create and run.
+
+The metadata is stored in a CSV table.
+
+Metadata manipulation is done via SQL.
+
+
 
 ### Examples - jobrun.pl
 
