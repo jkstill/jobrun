@@ -1,4 +1,3 @@
-#
 # Jared Still
 # 2024-05-21
 # jkstill@gmail.com
@@ -23,6 +22,9 @@ use File::Temp qw/ :seekable tmpnam/;
 #use Time::HiRes qw( usleep );
 use DBI;
 use IO::File;
+use POSIX qw(strftime);
+use Time::HiRes qw(time usleep);
+
 use lib '.';
 
 require Exporter;
@@ -63,6 +65,8 @@ sub createDbConnection {
 	return $dbh;
 }
 
+# add start,end,elapsed time to table
+
 sub createTable {
 	# create table if it does not exist
 	eval {
@@ -73,9 +77,12 @@ sub createTable {
 			qq{CREATE TABLE $controlTable (
 				name CHAR(50)
 				, pid CHAR(12)
-				, cmd CHAR(200)
 				, status CHAR(20)
-				, exit_code CHAR(10))
+				, start_time CHAR(30)
+				, end_time CHAR(30)
+				, elapsed_time CHAR(20)
+				, exit_code CHAR(10)
+				, cmd CHAR(200))
 			}
 		);
 	
@@ -97,11 +104,11 @@ sub truncateTable {
 
 sub insertTable {
 	my $self = shift;
-	print 'insertTable SELF: ' . Dumper($self);
+	#print 'insertTable SELF: ' . Dumper($self);
 	my $dbh = $self->{dbh};
-	my ($name,$pid,$cmd,$status,$exit_code) = @_;
-	my $sth = $dbh->prepare("INSERT INTO $controlTable (name,pid,cmd,status,exit_code) VALUES (?,?,?,?,?)");
-	$sth->execute($name,$pid,$cmd,$status,$exit_code);
+	my ($name,$pid,$status,$startTime, $endTime, $elapsedTime, $exit_code, $cmd) = @_;
+	my $sth = $dbh->prepare("INSERT INTO $controlTable (name,pid,status,start_time,end_time,elapsed_time,exit_code,cmd) VALUES (?,?,?,?,?,?,?,?)");
+	$sth->execute($name,$pid,$status,$startTime, $endTime, $elapsedTime, $exit_code, $cmd);
 	# DBD::CSV always autocommits
 	# this is here in the event that we use a different DBD
 	#$dbh->commit();
@@ -127,12 +134,12 @@ sub selectTable {
 }
 
 # only updates status and exit_code
-sub updateTable {
+sub updateStatus {
 	my $self = shift;
 	my $dbh = $self->{dbh};
-	my ($name,$status,$exit_code) = @_;
-	my $sth = $dbh->prepare("UPDATE $controlTable SET status = ?, exit_code = ? WHERE name = ?");
-	$sth->execute($status,$exit_code,$name);
+	my ($name,$status,$exit_code,$startTime,$endTime,$elapsedTime) = @_;
+	my $sth = $dbh->prepare("UPDATE $controlTable SET status = ?, exit_code = ?, start_time = ? , end_time = ?, elapsed_time = ?  WHERE name = ?");
+	$sth->execute($status,$exit_code,$startTime,$endTime,$elapsedTime,$name);
 	#$dbh->commit();
 }
 
@@ -156,11 +163,11 @@ sub new {
 	$args{dbh} = createDbConnection();
 	
 	$args{insert} = \&insertTable;
-	$args{update} = \&updateTable;
+	$args{updateStatus} = \&updateStatus;
 	$args{delete} = \&deleteTable;
 	$args{select} = \&selectTable;
 
-	# name,pid,cmd,status,exit_code) VALUES (?,?,?,?,?)");
+	# name,pid,status,start_time,end_time,elapsed_time,exit_code,cmd) VALUES (?,?,?,?,?)");
 	
 	$args{columnNamesByName} = { name => 0, pid => 1, cmd => 2,  status => 3, exit_code => 4};
 	$args{columnNamesByIndex} = { 0 => 'name', 1 => 'pid', 2 => 'cmd', 3 => 'status', 4 => 'exit_code'};
@@ -172,7 +179,17 @@ sub new {
 
    my $retval = bless \%args, $class;
 
-	$retval->{insert}($retval,$retval->{JOBNAME},$$,$retval->{CMD},'running','NA');
+	$retval->{insert}( $retval,
+		$retval->{JOBNAME},  #job name
+		$$, #pid
+		,'running' #status
+		,'NA' #exit code
+		, '' #start time
+		, '' #end time
+		, '' #elapsed time
+		, $retval->{CMD}, #command
+
+	);
    return $retval;
 }
 
@@ -189,12 +206,28 @@ sub status {
 	my $dbh = createDbConnection();
 	my $sth = $dbh->prepare("SELECT * FROM $controlTable");
 	$sth->execute();
-	printf "%-$config{colLenNAME}s %-$config{colLenPID}s %-$config{colLenSTATUS}s %-$config{colLenEXIT_CODE}s %-$config{colLenCMD}s\n", 'name', 'pid','status', 'exit_code', 'cmd';
-	printf "%-$config{colLenNAME}s %-$config{colLenPID}s %-$config{colLenSTATUS}s %-$config{colLenEXIT_CODE}s %-$config{colLenCMD}s\n", 
-		'-' x $config{colLenNAME}, '-' x $config{colLenPID}, '-' x $config{colLenSTATUS}, '-' x $config{colLenEXIT_CODE}, '-' x $config{colLenCMD};
+	# %-$config{colLenSTART_TIME}s %-$config{colLenEND_TIME}s %-$config{colLenELAPSED_TIME}s
+	printf "%-$config{colLenNAME}s %-$config{colLenPID}s %-$config{colLenSTATUS}s %-$config{colLenEXIT_CODE}s %-$config{colLenSTART_TIME}s %-$config{colLenEND_TIME}s %-$config{colLenELAPSED_TIME}s %-$config{colLenCMD}s\n", 
+		'name', 'pid','status', 'exit_code', 'start_time','end_time', 'elapsed', 'cmd';
+
+	printf "%-$config{colLenNAME}s %-$config{colLenPID}s %-$config{colLenSTATUS}s %-$config{colLenEXIT_CODE}s %-$config{colLenSTART_TIME}s %-$config{colLenEND_TIME}s %-$config{colLenELAPSED_TIME}s %-$config{colLenCMD}s\n", 
+		'-' x $config{colLenNAME}, '-' x $config{colLenPID}, '-' x $config{colLenSTATUS}, '-' x $config{colLenEXIT_CODE}, 
+		'-' x $config{colLenSTART_TIME}, '-' x $config{colLenEND_TIME} , '-' x $config{colLenELAPSED_TIME} ,
+		'-' x $config{colLenCMD};
 	while (my $row = $sth->fetchrow_hashref) {
-		printf "%-$config{colLenNAME}s %-$config{colLenPID}s %-$config{colLenSTATUS}s %-$config{colLenEXIT_CODE}s %-$config{colLenCMD}s\n",
-			$row->{name}, $row->{pid}, $row->{status}, $row->{exit_code}, $row->{cmd};
+		printf "%-$config{colLenNAME}s %-$config{colLenPID}s %-$config{colLenSTATUS}s %-$config{colLenEXIT_CODE}s %-$config{colLenSTART_TIME}s %-$config{colLenEND_TIME}s %$config{colLenELAPSED_TIME}f %-$config{colLenCMD}s\n",
+			$row->{name},
+			$row->{pid},
+			$row->{status},
+			$row->{exit_code},
+			$row->{start_time},
+			$row->{end_time},
+			$row->{elapsed_time},
+			substr(
+				$row->{cmd},
+				defined($config{colCmdStartPos}) ? $config{colCmdStartPos} : 0,
+				defined($config{colCmdEndPos}) ? $config{colCmdEndPos} : length($row->{cmd}) - 1,
+			);
 	}
 	return;
 }
@@ -250,6 +283,16 @@ sub getRunningJobPids {
 	return @jobPids;
 }
 
+sub microSleep {
+	my $microseconds = shift;
+	usleep(($microseconds/1000000)*1000000);
+}
+
+sub getTimeStamp {
+	my @t = [Time::HiRes::gettimeofday]->@*;
+	return strftime("%Y-%m-%d %H:%M:%S", localtime $t[0]) . "." . $t[1];
+}
+ 
 sub child {
 	my $self = shift;
 	my ($jobName,$cmd) = @_;
@@ -286,8 +329,16 @@ sub child {
 			#logger($self->{LOGFH},$self->{VERBOSE}, "grandChild:$pid:running\n");
 			##
 			#logger($self->{LOGFH} ,$self->{VERBOSE}, "grancChild:$pid running job $self->{JOBNAME}\n");
+			# run the command here
+			my $startTime = getTimeStamp();
+			my @t0 = [Time::HiRes::gettimeofday]->@*;
+			$self->{updateStatus}($self,$self->{JOBNAME},'running','',$startTime,'','');
 			system($self->{CMD});
 			my $rc = $?;
+			my @t1 = [Time::HiRes::gettimeofday]->@*;
+			my $endTime = getTimeStamp();
+
+			my $elapsedTime = sprintf("%.6f", Time::HiRes::tv_interval(\@t0,\@t1));
 
 			if ( $rc != 0 ) {
 				logger($self->{LOGFH},$self->{VERBOSE}, "#######################################\n");
@@ -312,7 +363,7 @@ sub child {
 	
 			$completedJobs{$self->{JOBNAME}} = $self->{CMD};
 			# it should not be necessary to pass $self here, not sure yet why it is necessary
-			$self->{update}($self,$self->{JOBNAME},$jobStatus,$rc);
+			$self->{updateStatus}($self,$self->{JOBNAME},$jobStatus,$rc,$startTime,$endTime,$elapsedTime);
 			logger($self->{LOGFH},$self->{VERBOSE}, "just updated completedJobs{$self->{JOBNAME}} = $self->{CMD}\n");
 			#decrementChildren();
 			exit $rc;
