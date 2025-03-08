@@ -23,7 +23,6 @@ use Getopt::Long qw(:config pass_through) ;
 use lib './lib';
 use Jobrun qw(logger %allJobs);
 use sigtrap 'handler', sub{ cleanup(); exit; }, qw(QUIT TERM);
-use IPC::Shareable;
 use Proc::ProcessTable;
 use List::Util qw(any);
 
@@ -31,7 +30,7 @@ $Data::Dumper::Terse = 1; # to Eval whole thing as a hash
 $Data::Dumper::Indent = 1; # Looks better, just a preference
 $Data::Dumper::Sortkeys = 1; # To keep changes minimal in source control
 
-# seem comments later about using signals to run code
+# see comments later about using signals to run code
 # does not seem to work in a useful manner
 # I think what happens is the current call gets interrupted by the signal,
 # and the return is to whatever the following line of code is.
@@ -84,19 +83,7 @@ if ( -f $resumableFile ) { $jobFile = $resumableFile; };
 -r $configFile || die "could not read $configFile - $!\n";
 -r $jobFile || die "could not read $jobFile - $!\n";
 
-getKV($configFile,\%config);
-banner('#',80,"\%config - $configFile");
-showKV(\%config);
-getKV($jobFile,\%jobsToRun);
-banner('#',80,"\%jobsToRun - $jobFile");
-showKV(\%jobsToRun);
-
 %Jobrun::allJobs = %jobsToRun;
-
-banner('#',80,'%Jobrun::allJobs');
-#showKV(\%Jobrun::allJobs);
-Jobrun::showAllJobs();
-#exit;
 
 #"reload-config!" => \$reloadConfigFile,
 
@@ -122,6 +109,18 @@ GetOptions(
 usage(1) if $#ARGV > -1;
 #exit;
 
+getKV($configFile,\%config);
+getKV($jobFile,\%jobsToRun);
+
+if ($verbose) {
+	banner('#',80,"\%config - $configFile") if $verbose;
+	showKV(\%config) if $verbose;
+	banner('#',80,"\%jobsToRun - $jobFile") if $verbose;
+	showKV(\%jobsToRun) if $verbose;
+	banner('#',80,'%Jobrun::allJobs') if $verbose;
+	#showKV(\%Jobrun::allJobs);
+	Jobrun::showAllJobs() if $verbose;
+}
 
 # trapping signals to run the status and reload config causes the 
 # main script to add more jobs
@@ -142,26 +141,28 @@ if ( $reloadConfigFile ) {
 
 if ( $getStatus ) {
 	# send HUP to pid of main process
-	Jobrun::status();
+	Jobrun::status(%config);
 	exit 0;
 }
 
-
+# kill with -kill (-9). TERM, QUIT, etc do not work
 if ( $exitNow ) {
 	# send HUP to pid of main process
 	my $mainPID = getMainPid();
-	my $childrenHash = Jobrun::getJobPids();
-	my @childPids = map { (split(/:/,$childrenHash->{$_}))[0] }  keys %{$childrenHash};
+	my @childPids = Jobrun::getRunningJobPids();
 	print 'ChildPIDs: ' . Dumper(\@childPids);
-	kill '-QUIT', @childPids;
-	kill '-QUIT', $mainPID;
+	foreach my $pid ( @childPids ) {
+		kill '-KILL', $pid;
+	}
+	waitpid(0,0);
+	kill '-KILL', $mainPID;
 	unlink 'jobrun.pid';
 	exit 0;
 }
 
 use Fcntl qw(:flock);
 open our $file, '<', $0 or die $!;
-flock $file, LOCK_EX|LOCK_NB or die "Only 1 jobrun can be executing in the current dirctory-$!\n";
+flock $file, LOCK_EX|LOCK_NB or die "Only 1 jobrun can be executing in the current directory-$!\n";
 
 createPidFile();
 
@@ -177,6 +178,9 @@ $config{'logdir'} = $logdir if defined($logdir);
 $config{'logfile-base'} = $logfileBase if defined($logfileBase);
 $config{'logfile-suffix'} = $logfileSuffix if defined($logfileSuffix);
 $config{'iteration-seconds'} = $iterationSeconds if defined($iterationSeconds);
+
+#print Dumper(\%config);
+#exit;
 
 my ($sec,$min,$hour,$mday,$mon,$year,$wday,$yday,$isdst) = localtime(time);
 
@@ -199,8 +203,9 @@ if ($debug) {
 }
 
 logger($logFileFH,$config{verbose}, "parent pid: $$\n:");
-#my $dummy=<STDIN>;
-#exit;
+
+# call this only once, as it will re-initialize the table
+Jobrun::init();
 
 while(1) {
 	
@@ -220,8 +225,6 @@ while(1) {
 		);
 		logger($logFileFH,$config{verbose}, "JOB: $currJobName: $jobsToRun{$currJobName}\n");
 		$jobs{$currJobName}->child();
-		#next;
-		Jobrun::incrementChildren();	
 		next;
 	}
 
@@ -229,8 +232,6 @@ while(1) {
 	logger($logFileFH,$config{verbose},"parent:$$ child count " . Jobrun::getChildrenCount() . "\n");
 	last if $numberJobsToRun < 1;
 
-	logger($logFileFH,$config{verbose}, '%pidTree: ' . Dumper(\%Jobrun::pidTree));
-	
 	sleep $config{'iteration-seconds'};
 }
 
@@ -250,13 +251,14 @@ exit;
 
 sub cleanup {
 	# wait for jobs to finish
-	my $sleepTime = 5;
+	my $sleepTime = 2;
 
 	print "Current Children: " . Jobrun::getChildrenCount() . "\n";
 	logger($logFileFH,$config{verbose},"parent:$$ Current Children: " . Jobrun::getChildrenCount() . "\n");
 	while ( Jobrun::getChildrenCount() > 0 ) {
 		logger($logFileFH,$config{verbose},"parent:$$ " . "main: waiting for children to complete\n");
-		sleep $config{'iteration-seconds'};
+		#sleep $config{'iteration-seconds'};
+		sleep $sleepTime;
 	}
 	print "Current Children: " . Jobrun::getChildrenCount() . "\n";
 	logger($logFileFH,$config{verbose},"parent:$$ Current Children after wait: " . Jobrun::getChildrenCount() . "\n");
@@ -269,60 +271,6 @@ sub cleanup {
 		push @jobrunPids, $pid;
 	}
 
-	while (1) {
-		my %userPids = getPidsByList(\@jobrunPids);
-
-		print Dumper(\%userPids);
-
-		if ( scalar keys %userPids == 0 ) {
-			print "All processes have completed\n";
-			last;
-		} else {
-			print "Some processes are still running\n";
-			foreach my $pid ( keys %userPids ) {
-				print "PID: $pid - $userPids{$pid}\n";
-			}
-		}
-		sleep $sleepTime;
-	}
-
-	# There is either a bug in Jobrun.pm, or some unknown issue with tied hashes
-	# Even though logging shows all children updated their status, the tied hash does not reflect this
-	# so I will do a manual cleanup here	
-	# I know that the jobs have completed, as the previous block of code verifies the PIDs are no longer running
-   # make surece the %completedJobs hash is updated
-	foreach my $jobName ( keys %Jobrun::allJobs ) {
-
-		my ($pid,$status) = split(/:/,$Jobrun::jobPids{$jobName});
-
-		if ( ! exists $Jobrun::completedJobs{$jobName} ) {
-			$Jobrun::completedJobs{$jobName} = "$pid: completed by cleanup";
-		}
-
-		if ($Jobrun::jobPids{$jobName} =~ /$pid:running/ ) {
-			$Jobrun::jobPids{$jobName} = "$pid:complete";
-		}
-	}
-	
-	# sleep for a few seconds, as the tied hashes may not be updated immediately
-	# A lot of effort has been put into troubleshooting why some jobs are not updating their status
-	# The jobs _are_ updating status, as shown by the log files
-	# The issue is that the tied hashes are not updating immediately
-	# The sleep did not completely fix the problem.
-	# I can seen from the console output that some are still shown as running
-	# but the log files show they have completed
-	# But, after the sleep, the resumable file is sometimes created, sometimes not
-	# I am not sure what is going on here
-	#sleep 10;	
-	##
-	# this has me rethinking the use of tied hashes to store the job status,etc.
-	# see https://www.reddit.com/r/perl/comments/18pda43/speed_of_tie/
-	# tie is just too slow
-	# consider using sqlite, or maybe CSV with SQL, as there will never be more than a few thousand records
-
-	logger($logFileFH,$config{verbose},"parent:$$\n" . '%pidTree cleanup before: ' . Dumper(\%Jobrun::pidTree));
-	print '%pidTree cleanup before: ' . Dumper(\%Jobrun::pidTree);
-
 	logger($logFileFH,$config{verbose},"All Jobs:\n" .  Dumper(\%Jobrun::allJobs));
 	logger($logFileFH,$config{verbose},"Completed Jobs:\n" .  Dumper(\%Jobrun::completedJobs));
 	logger($logFileFH,$config{verbose},"Jobs Status:\n" .  Dumper(\%Jobrun::jobPids));
@@ -330,10 +278,6 @@ sub cleanup {
 	Jobrun::createResumableFile($resumableFile) if $resumable;
 	# remove resumable file if it exists and is 0 bytes
 	Jobrun::cleanupResumableFile($resumableFile);
-	Jobrun::cleanup(); # Note: This will remove the semaphore. Only call this when absolutely necessary.
-
-	logger($logFileFH,$config{verbose},"parent:$$\n" . '%pidTree cleanup after ' . Dumper(\%Jobrun::pidTree));
-	print '%pidTree cleanup after ' . Dumper(\%Jobrun::pidTree);
 
 	if ( -w 'jobrun.pid' ) {
 		unlink 'jobrun.pid;'
@@ -422,10 +366,6 @@ sub stillRunning {
 	return kill 0, $pid;
 }
 
-
-
-
-
 sub usage {
    my $exitVal = shift;
    $exitVal = 0 unless defined $exitVal;
@@ -470,7 +410,9 @@ Example:
 
  Pressing CTL-C will not stop jobrun, but it will print a status message.
 
- Pressing CTL-\ will kill the program and cleanup semaphores
+ Pressing CTL-\ should kill the program and children.
+
+ 'jorun.pl --kill' will kill the parent and children immediately if CTL-\ does not work.
 
  The config file can be reloaded by sending the HUP signal to the current jobrun.pl parent process.
 
@@ -494,7 +436,7 @@ Example:
 
  It may take a few moments for the chilren to die.
 
- The fastest method to stop jobrun is CTL-\
+ The fastest method to stop jobrun is 'jobrun.pl --kill'
 
 }  or  usage(1);
 

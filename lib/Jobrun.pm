@@ -1,4 +1,3 @@
-#
 # Jared Still
 # 2024-05-21
 # jkstill@gmail.com
@@ -11,9 +10,6 @@
 
 TODO
 
-Sometimes the IPC cleanup leaves behind a semaphore array and maybe a tied hash in memory
-This does not happen consistently, and I do not yet know why it happens at all
-
 =cut
 
 
@@ -21,13 +17,14 @@ package Jobrun;
 
 use warnings;
 use strict;
-use IPC::SysV qw(IPC_PRIVATE SEM_UNDO IPC_CREAT S_IRUSR S_IWUSR);
-use IPC::Semaphore;
 use Data::Dumper;
 use File::Temp qw/ :seekable tmpnam/;
 #use Time::HiRes qw( usleep );
-use IPC::Shareable;
+use DBI;
 use IO::File;
+use POSIX qw(strftime);
+use Time::HiRes qw(time usleep);
+
 use lib '.';
 
 require Exporter;
@@ -36,48 +33,115 @@ our @EXPORT_OK = qw(logger %allJobs);
 our @EXPORT = qw();
 our $VERSION = '0.01';
 
-#use POSIX qw( ENOTCONN ECONNREFUSED ECONNRESET EINPROGRESS EWOULDBLOCK EAGAIN WNOHANG );
-
-# 'exclusive => 0' allows using 'jobrun.pl --kill'
-my %shmOptions = (
-   create    => 1,
-   exclusive => 0,
-   mode      => 0644,
-   destroy   => 1
-);
-
-my $tieType='IPC::Shareable';
-
-$shmOptions{key}='jobpid';
-our %jobPids=();
-tie %jobPids, $tieType, \%shmOptions or die "tie failed jobPids - $!\n";
-
 our %completedJobs=();
-$shmOptions{key}='completed-id';
-tie %completedJobs, $tieType, \%shmOptions or die "tie failed %completedJobs= - $!\n";
 
 # %allJobs used when creating resumable file
 our %allJobs;
-# %pidTree used to track if jobs completed when eix
-our %pidTree;
-$shmOptions{key}='pidtree';
-tie %pidTree, $tieType, \%shmOptions or die "tie failed %pidTree= - $!\n";
 
-use constant {
-    SEM_CHILD_COUNT => 0, # Index for child count semaphore
-    SEM_LOCK => 1,        # Index for lock semaphore
-};
+our $tableDir = './tables';
+mkdir $tableDir unless -d $tableDir;
+-d $tableDir or die "table directory $tableDir not created: $!\n";
 
+our $controlTable = 'jobrun_control';
 
-# Create semaphores
-#my $semKey = IPC_PRIVATE; # Private key for IPC
-# sem key must be numeric
-my $semKey = 51853289;
-my $sem = IPC::Semaphore->new($semKey, 2, S_IRUSR | S_IWUSR | IPC_CREAT | SEM_UNDO) or die "Unable to create semaphore: $!";
+# call this just once from the driver script jobrun.pl
+our $utilDBH;
+sub init {
+	$utilDBH = createDbConnection();
+	createTable();
+	truncateTable();
+}
 
-# Initialize semaphore values
-$sem->setval(SEM_CHILD_COUNT, 0);
-$sem->setval(SEM_LOCK, 1); # 1 indicates that the lock is available
+sub createDbConnection {
+	my $dbh = DBI->connect ("dbi:CSV:", undef, undef, 
+		{
+			f_ext      => ".csv",
+			f_dir      => $tableDir,
+			flock      => 2,
+			RaiseError => 1,
+		}
+	) or die "Cannot connect: $DBI::errstr";
+
+	return $dbh;
+}
+
+# add start,end,elapsed time to table
+
+sub createTable {
+	# create table if it does not exist
+	eval {
+		local $utilDBH->{RaiseError} = 1;
+		local $utilDBH->{PrintError} = 0;
+
+		$utilDBH->do (
+			qq{CREATE TABLE $controlTable (
+				name CHAR(50)
+				, pid CHAR(12)
+				, status CHAR(20)
+				, start_time CHAR(30)
+				, end_time CHAR(30)
+				, elapsed_time CHAR(20)
+				, exit_code CHAR(10)
+				, cmd CHAR(200))
+			}
+		);
+	
+	};
+
+	#if ($@) {
+	#print "Error: $@\n";
+	#print "Table most likely already exists\n";
+	#}
+
+	return;
+}
+
+sub truncateTable {
+	$utilDBH = createDbConnection();
+	$utilDBH->do("DELETE FROM $controlTable");
+	return;
+}
+
+sub insertTable {
+	my $self = shift;
+	#print 'insertTable SELF: ' . Dumper($self);
+	my $dbh = $self->{dbh};
+	my ($name,$pid,$status,$startTime, $endTime, $elapsedTime, $exit_code, $cmd) = @_;
+	my $sth = $dbh->prepare("INSERT INTO $controlTable (name,pid,status,start_time,end_time,elapsed_time,exit_code,cmd) VALUES (?,?,?,?,?,?,?,?)");
+	$sth->execute($name,$pid,$status,$startTime, $endTime, $elapsedTime, $exit_code, $cmd);
+	# DBD::CSV always autocommits
+	# this is here in the event that we use a different DBD
+	#$dbh->commit();
+}
+
+sub deleteTable {
+	my $self = shift;
+	my $dbh = $self->{dbh};
+	my ($name) = @_;
+	my $sth = $dbh->prepare("DELETE FROM $controlTable WHERE name = ?");
+	$sth->execute($name);
+	#$dbh->commit();
+}
+
+sub selectTable {
+	my $self = shift;
+	my $dbh = $self->{dbh};
+	my ($name) = @_;
+	my $sth = $dbh->prepare("SELECT * FROM $controlTable WHERE name = ?");
+	$sth->execute($name);
+	my $row = $sth->fetchrow_hashref;
+	return $row;
+}
+
+# only updates status and exit_code
+sub updateStatus {
+	my $self = shift;
+	my $dbh = $self->{dbh};
+	my ($name,$status,$exit_code,$startTime,$endTime,$elapsedTime) = @_;
+	my $sth = $dbh->prepare("UPDATE $controlTable SET status = ?, exit_code = ?, start_time = ? , end_time = ?, elapsed_time = ?  WHERE name = ?");
+	$sth->execute($status,$exit_code,$startTime,$endTime,$elapsedTime,$name);
+	#$dbh->commit();
+}
 
 sub logger {
 	my $fh = shift @_;
@@ -95,68 +159,76 @@ sub new {
    my $class = ref($pkg) || $pkg;
    #print "Class: $class\n";
    my (%args) = @_;
+	
+	$args{dbh} = createDbConnection();
+	
+	$args{insert} = \&insertTable;
+	$args{updateStatus} = \&updateStatus;
+	$args{delete} = \&deleteTable;
+	$args{select} = \&selectTable;
+
+	# name,pid,status,start_time,end_time,elapsed_time,exit_code,cmd) VALUES (?,?,?,?,?)");
+	
+	$args{columnNamesByName} = { name => 0, pid => 1, cmd => 2,  status => 3, exit_code => 4};
+	$args{columnNamesByIndex} = { 0 => 'name', 1 => 'pid', 2 => 'cmd', 3 => 'status', 4 => 'exit_code'};
+	$args{columnValues} = [qw/undef undef undef undef undef/];
+
+	my ($user,$passwd,$uid,$gid,$quota,$comment,$gcos,$dir,$shell,$expire)
+   	= getpwuid($<) or die "getpwuid: $!";
+	print "User: $user, UID: $uid\n";
 
    my $retval = bless \%args, $class;
-   #print 'Sqlrun::new retval: ' . Dumper($retval);
+
+	$retval->{insert}( $retval,
+		$retval->{JOBNAME},  #job name
+		$$, #pid
+		,'running' #status
+		,'NA' #exit code
+		, '' #start time
+		, '' #end time
+		, '' #elapsed time
+		, $retval->{CMD}, #command
+
+	);
    return $retval;
 }
 
-sub lock {
-    # Wait for lock to become available and decrement it
-    $sem->op(SEM_LOCK, -1, SEM_UNDO);
-}
-
-sub unlock {
-    # Increment the lock semaphore to release it
-    $sem->op(SEM_LOCK, 1, SEM_UNDO);
-}
-
-sub incrementChildren {
-    lock();
-    # Perform safe increment
-    my $current_value = $sem->getval(SEM_CHILD_COUNT);
-    $sem->setval(SEM_CHILD_COUNT, $current_value + 1);
-    unlock();
-}
-
-sub decrementChildren {
-    lock();
-    # Perform safe decrement
-    my $current_value = $sem->getval(SEM_CHILD_COUNT);
-	 if ($current_value) {
-    	$sem->setval(SEM_CHILD_COUNT, $current_value - 1);
-	}
-    unlock();
-}
-
 sub getChildrenCount {
-    # Return current child count
-    return $sem->getval(SEM_CHILD_COUNT);
-}
-
-sub cleanup {
-	# This should be called to cleanup semaphores, typically on program exit
-	# or when the job engine dies unexpectedly.
-	warn "Jobrun::cleanup() running\n";
-	lock();
-	$sem->setval(SEM_CHILD_COUNT, 0);
-	$sem->setval(SEM_LOCK, 1);
-	unlock();
-	$sem->remove();
-
-	(tied %completedJobs)->remove();
-	(tied %pidTree)->remove();
-	(tied %jobPids)->remove();
-	IPC::Shareable->clean_up_all();
-	return;
+	# Return current child count
+	my $sth = $utilDBH->prepare("SELECT count(*) child_count FROM $controlTable WHERE status = 'running'");
+	$sth->execute();
+	my $row = $sth->fetchrow_hashref;
+	return $row->{child_count} ? $row->{child_count} : 0;
 }
 
 sub status {
-	print "=== STATUS ===\n";
-	foreach my $key ( sort keys %jobPids ) {
-		print "job: $key status: $jobPids{$key}\n";
+	my (%config) = @_;
+	my $dbh = createDbConnection();
+	my $sth = $dbh->prepare("SELECT * FROM $controlTable");
+	$sth->execute();
+	# %-$config{colLenSTART_TIME}s %-$config{colLenEND_TIME}s %-$config{colLenELAPSED_TIME}s
+	printf "%-$config{colLenNAME}s %-$config{colLenPID}s %-$config{colLenSTATUS}s %-$config{colLenEXIT_CODE}s %-$config{colLenSTART_TIME}s %-$config{colLenEND_TIME}s %-$config{colLenELAPSED_TIME}s %-$config{colLenCMD}s\n", 
+		'name', 'pid','status', 'exit_code', 'start_time','end_time', 'elapsed', 'cmd';
+
+	printf "%-$config{colLenNAME}s %-$config{colLenPID}s %-$config{colLenSTATUS}s %-$config{colLenEXIT_CODE}s %-$config{colLenSTART_TIME}s %-$config{colLenEND_TIME}s %-$config{colLenELAPSED_TIME}s %-$config{colLenCMD}s\n", 
+		'-' x $config{colLenNAME}, '-' x $config{colLenPID}, '-' x $config{colLenSTATUS}, '-' x $config{colLenEXIT_CODE}, 
+		'-' x $config{colLenSTART_TIME}, '-' x $config{colLenEND_TIME} , '-' x $config{colLenELAPSED_TIME} ,
+		'-' x $config{colLenCMD};
+	while (my $row = $sth->fetchrow_hashref) {
+		printf "%-$config{colLenNAME}s %-$config{colLenPID}s %-$config{colLenSTATUS}s %-$config{colLenEXIT_CODE}s %-$config{colLenSTART_TIME}s %-$config{colLenEND_TIME}s %$config{colLenELAPSED_TIME}f %-$config{colLenCMD}s\n",
+			$row->{name},
+			$row->{pid},
+			$row->{status},
+			$row->{exit_code},
+			$row->{start_time},
+			$row->{end_time},
+			$row->{elapsed_time},
+			substr(
+				$row->{cmd},
+				defined($config{colCmdStartPos}) ? $config{colCmdStartPos} : 0,
+				defined($config{colCmdEndPos}) ? $config{colCmdEndPos} : length($row->{cmd}) - 1,
+			);
 	}
-	print "====================================\n";
 	return;
 }
 
@@ -199,10 +271,28 @@ sub cleanupResumableFile {
 	return;
 }
 
-sub getJobPids {
-	return \%jobPids;
+# this may be called with --kill, so we need to create a connection
+sub getRunningJobPids {
+	my $dbh = createDbConnection();
+	my $sth = $dbh->prepare("SELECT pid FROM $controlTable WHERE status = 'running'");
+	$sth->execute();
+	my @jobPids;
+	while (my $row = $sth->fetchrow_hashref) {
+		push @jobPids, $row->{pid};
+	}
+	return @jobPids;
 }
 
+sub microSleep {
+	my $microseconds = shift;
+	usleep(($microseconds/1000000)*1000000);
+}
+
+sub getTimeStamp {
+	my @t = [Time::HiRes::gettimeofday]->@*;
+	return strftime("%Y-%m-%d %H:%M:%S", localtime $t[0]) . "." . $t[1];
+}
+ 
 sub child {
 	my $self = shift;
 	my ($jobName,$cmd) = @_;
@@ -226,15 +316,29 @@ sub child {
 			# use system() here
 			#qx/$cmd/;
 			my $pid=$$;
-			$pidTree{$grantParentPID}->{$parentPID}=$pid;
+			logger($self->{LOGFH},$self->{VERBOSE}, "#######################################\n");
+			logger($self->{LOGFH},$self->{VERBOSE}, "## job name: $self->{JOBNAME} child pid: $pid\n");
+			logger($self->{LOGFH},$self->{VERBOSE}, "#######################################\n");
+			my $dbh = $self->{dbh};
+			my $sth = $dbh->prepare("UPDATE $controlTable SET pid = ? WHERE name = ?");
+			$sth->execute($pid,$self->{JOBNAME});
+			#$dbh->commit();
 
-			$jobPids{$self->{JOBNAME}} = "$pid:running";
+			#$jobPids{$self->{JOBNAME}} = "$pid:running";
 
-			logger($self->{LOGFH},$self->{VERBOSE}, "grandChild:$pid:running\n");
-			#
-			logger($self->{LOGFH} ,$self->{VERBOSE}, "grancChild:$pid running job $self->{JOBNAME}\n");
+			#logger($self->{LOGFH},$self->{VERBOSE}, "grandChild:$pid:running\n");
+			##
+			#logger($self->{LOGFH} ,$self->{VERBOSE}, "grancChild:$pid running job $self->{JOBNAME}\n");
+			# run the command here
+			my $startTime = getTimeStamp();
+			my @t0 = [Time::HiRes::gettimeofday]->@*;
+			$self->{updateStatus}($self,$self->{JOBNAME},'running','',$startTime,'','');
 			system($self->{CMD});
 			my $rc = $?;
+			my @t1 = [Time::HiRes::gettimeofday]->@*;
+			my $endTime = getTimeStamp();
+
+			my $elapsedTime = sprintf("%.6f", Time::HiRes::tv_interval(\@t0,\@t1));
 
 			if ( $rc != 0 ) {
 				logger($self->{LOGFH},$self->{VERBOSE}, "#######################################\n");
@@ -257,17 +361,11 @@ sub child {
 				logger($self->{LOGFH},$self->{VERBOSE}, sprintf "!!child $pid exited with value %d\n", $? >> 8);
 			}
 	
-			# there seems to be a race condition here
-			# jobrun.pl will check for children, and if none are found, it does cleanup
-			# however, the child may not have had time to update the semaphore and the status
-			# so the driver (jobrun.pl) will create the 'resumable' file, even though the completed
-			# fix this by putting the decrement call after the status update
-			$jobPids{$self->{JOBNAME}} = "$pid:$jobStatus";
-			logger($self->{LOGFH},$self->{VERBOSE}, "just updated jobPids{$self->{JOBNAME}} = $pid:$jobStatus\n");
 			$completedJobs{$self->{JOBNAME}} = $self->{CMD};
+			# it should not be necessary to pass $self here, not sure yet why it is necessary
+			$self->{updateStatus}($self,$self->{JOBNAME},$jobStatus,$rc,$startTime,$endTime,$elapsedTime);
 			logger($self->{LOGFH},$self->{VERBOSE}, "just updated completedJobs{$self->{JOBNAME}} = $self->{CMD}\n");
-			decrementChildren();
-			delete $pidTree{$grantParentPID}->{$parentPID};
+			#decrementChildren();
 			exit $rc;
 		} else {
 			exit 0;
@@ -279,4 +377,5 @@ sub child {
 	return;
 }
 
+1;
 
