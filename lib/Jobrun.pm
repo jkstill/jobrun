@@ -259,12 +259,14 @@ sub createResumableFile {
 
 	my  $dbh = createDbConnection();
 	# cannot figure  out use to get '!=' or 'not in' to work with DBD::CSV
-	my $sql = "SELECT name,status FROM $controlTable";
-	#warn "SQL: $sql\n";
+	# in DBD::CSV  :
+	#    '!=' is not supported
+	#    '<>' is not supported
+	#    'NOT IN' must be capitalized - not sure if this is a bug or by design
+	my $sql = "SELECT name,status FROM $controlTable WHERE status NOT IN ('complete')";
 	my $sth = $dbh->prepare($sql);
 	$sth->execute();	
 	while (my @row = $sth->fetchrow_array) {
-		next if $row[1] eq 'complete';
 		$fh->print("$row[0]" . ':' . "$jobsHashRef->{$row[0]}\n");
 	}
 	return;
