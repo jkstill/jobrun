@@ -19,8 +19,8 @@ use warnings;
 use strict;
 use Data::Dumper;
 use File::Temp qw/ :seekable tmpnam/;
-#use Time::HiRes qw( usleep );
 use DBI;
+use Carp;
 use IO::File;
 use POSIX qw(strftime);
 use Time::HiRes qw(time usleep);
@@ -29,20 +29,22 @@ use lib '.';
 
 require Exporter;
 our @ISA= qw(Exporter);
-our @EXPORT_OK = qw(logger %allJobs);
+our @EXPORT_OK = qw(logger);
 our @EXPORT = qw();
 our $VERSION = '0.01';
 
-our %completedJobs=();
-
-# %allJobs used when creating resumable file
-our %allJobs;
-
 our $tableDir = './tables';
 mkdir $tableDir unless -d $tableDir;
--d $tableDir or die "table directory $tableDir not created: $!\n";
+-d $tableDir or croak "table directory $tableDir not created: $!\n";
 
-our $controlTable = 'jobrun_control';
+our $controlTable;
+sub setControlTable {
+	$controlTable = shift;
+}
+
+sub getControlTable {
+	return $controlTable;
+}
 
 # call this just once from the driver script jobrun.pl
 our $utilDBH;
@@ -60,7 +62,7 @@ sub createDbConnection {
 			flock      => 2,
 			RaiseError => 1,
 		}
-	) or die "Cannot connect: $DBI::errstr";
+	) or croak "Cannot connect: $DBI::errstr";
 
 	return $dbh;
 }
@@ -125,12 +127,12 @@ sub deleteTable {
 
 sub selectTable {
 	my $self = shift;
+	my ($column,$value) = @_;
 	my $dbh = $self->{dbh};
-	my ($name) = @_;
-	my $sth = $dbh->prepare("SELECT * FROM $controlTable WHERE name = ?");
-	$sth->execute($name);
-	my $row = $sth->fetchrow_hashref;
-	return $row;
+	my $sth = $dbh->prepare("SELECT * FROM $controlTable WHERE ? = ?");
+	$sth->execute($column,$value);
+	my $hashRef = $sth->fetchall_hashref;
+	return $hashRef;
 }
 
 # only updates status and exit_code
@@ -174,7 +176,7 @@ sub new {
 	$args{columnValues} = [qw/undef undef undef undef undef/];
 
 	my ($user,$passwd,$uid,$gid,$quota,$comment,$gcos,$dir,$shell,$expire)
-   	= getpwuid($<) or die "getpwuid: $!";
+   	= getpwuid($<) or croak "getpwuid: $!";
 	print "User: $user, UID: $uid\n";
 
    my $retval = bless \%args, $class;
@@ -201,10 +203,23 @@ sub getChildrenCount {
 	return $row->{child_count} ? $row->{child_count} : 0;
 }
 
+# status is called as a separate process
+# and will have not knowledge of the Jobrun object
+# so we need to pass the controlTable name
 sub status {
-	my (%config) = @_;
+	my ($controlTable, $statusType, %config) = @_;
 	my $dbh = createDbConnection();
-	my $sth = $dbh->prepare("SELECT * FROM $controlTable");
+	my $sql;
+	-r "$tableDir/${controlTable}.csv" or croak "table $tableDir/$controlTable.csv does not exist: $!\n";
+	if ($statusType eq 'all') {
+		$sql = "SELECT * FROM $controlTable order by start_time desc";
+	} else {
+		$sql = "SELECT * FROM $controlTable WHERE status = '$statusType' order by start_time desc";
+	}
+
+	print "table: $controlTable\n";
+
+	my $sth = $dbh->prepare($sql);
 	$sth->execute();
 	# %-$config{colLenSTART_TIME}s %-$config{colLenEND_TIME}s %-$config{colLenELAPSED_TIME}s
 	printf "%-$config{colLenNAME}s %-$config{colLenPID}s %-$config{colLenSTATUS}s %-$config{colLenEXIT_CODE}s %-$config{colLenSTART_TIME}s %-$config{colLenEND_TIME}s %-$config{colLenELAPSED_TIME}s %-$config{colLenCMD}s\n", 
@@ -215,51 +230,42 @@ sub status {
 		'-' x $config{colLenSTART_TIME}, '-' x $config{colLenEND_TIME} , '-' x $config{colLenELAPSED_TIME} ,
 		'-' x $config{colLenCMD};
 	while (my $row = $sth->fetchrow_hashref) {
-		printf "%-$config{colLenNAME}s %-$config{colLenPID}s %-$config{colLenSTATUS}s %-$config{colLenEXIT_CODE}s %-$config{colLenSTART_TIME}s %-$config{colLenEND_TIME}s %$config{colLenELAPSED_TIME}f %-$config{colLenCMD}s\n",
+		my  $rowlen = length($row->{cmd}) + 0;
+		#warn "rowlen: $rowlen\n";
+		printf "%-$config{colLenNAME}s %-$config{colLenPID}s %-$config{colLenSTATUS}s %-$config{colLenEXIT_CODE}s %-$config{colLenSTART_TIME}s %-$config{colLenEND_TIME}s %$config{colLenELAPSED_TIME}s %-$config{colLenCMD}s\n",
 			$row->{name},
 			$row->{pid},
 			$row->{status},
 			$row->{exit_code},
 			$row->{start_time},
 			$row->{end_time},
-			$row->{elapsed_time},
+			sprintf('%6.6f',$row->{elapsed_time} ? $row->{elapsed_time} : 0),
 			substr(
 				$row->{cmd},
 				defined($config{colCmdStartPos}) ? $config{colCmdStartPos} : 0,
-				defined($config{colCmdEndPos}) ? $config{colCmdEndPos} : length($row->{cmd}) - 1,
+				defined( $config{colCmdEndPos}) 
+					? $config{colCmdEndPos} 
+					: ($rowlen - 1),
 			);
 	}
 	return;
 }
 
-sub showCompletedJobs {
-
-	print "===  COMPLETED ===\n";
-	foreach my $key ( sort keys %completedJobs ) {
-		print "job: $key status: $completedJobs{$key}\n";
-	}
-	print "====================================\n";
-	return;
-
-}
-
-sub showAllJobs {
-	foreach my $key ( sort keys %allJobs ) {
-		#$fh->print("$key:$allJobs{$key}\n") unless exists($completedJobs{$key});
-		print "$key:$allJobs{$key}\n";
-	}
-	return;
-}
-
 sub createResumableFile {
-	my ($resumableFileName) = @_;
+	my ($resumableFileName,$jobsHashRef) = @_;
 
 	my $fh = new IO::File;
-	$fh->open($resumableFileName, '>') or die "could not create resumable file - $resumableFileName: $!\n";
+	$fh->open($resumableFileName, '>') or croak "could not create resumable file - $resumableFileName: $!\n";
 
-	foreach my $key ( sort keys %allJobs ) {
-		$fh->print("$key:$allJobs{$key}\n") unless exists($completedJobs{$key});
-		#$fh->print("$key:$allJobs{$key}\n");
+	my  $dbh = createDbConnection();
+	# cannot figure  out use to get '!=' or 'not in' to work with DBD::CSV
+	my $sql = "SELECT name,status FROM $controlTable";
+	#warn "SQL: $sql\n";
+	my $sth = $dbh->prepare($sql);
+	$sth->execute();	
+	while (my @row = $sth->fetchrow_array) {
+		next if $row[1] eq 'complete';
+		$fh->print("$row[0]" . ':' . "$jobsHashRef->{$row[0]}\n");
 	}
 	return;
 }
@@ -293,6 +299,11 @@ sub getTimeStamp {
 	return strftime("%Y-%m-%d %H:%M:%S", localtime $t[0]) . "." . $t[1];
 }
  
+sub getTableTimeStamp {
+	my @t = [Time::HiRes::gettimeofday]->@*;
+	return strftime("%Y_%m_%d_%H_%M_%S", localtime $t[0]);
+}
+ 
 sub child {
 	my $self = shift;
 	my ($jobName,$cmd) = @_;
@@ -301,8 +312,8 @@ sub child {
 	my $grantParentPID=$$;
 
 	my $child = fork();
-	#die("Can't fork: $!") unless defined ($child = fork());
-	die("Can't fork #1: $!") unless defined($child);
+	#croak("Can't fork: $!") unless defined ($child = fork());
+	croak("Can't fork #1: $!") unless defined($child);
 
 	if ($child) {
 		logger($self->{LOGFH},$self->{VERBOSE},"child:$$  cmd:$self->{CMD}\n");
@@ -310,7 +321,7 @@ sub child {
 	} else {
 		my $parentPID=$$;
 		my $grandChild = fork();	
-		die("Can't fork #2: $!") unless defined($grandChild);
+		croak("Can't fork #2: $!") unless defined($grandChild);
 
 		if ($grandChild == 0 ) {
 			# use system() here
@@ -334,7 +345,7 @@ sub child {
 			my @t0 = [Time::HiRes::gettimeofday]->@*;
 			$self->{updateStatus}($self,$self->{JOBNAME},'running','',$startTime,'','');
 			system($self->{CMD});
-			my $rc = $?;
+			my $rc = $?>>8;
 			my @t1 = [Time::HiRes::gettimeofday]->@*;
 			my $endTime = getTimeStamp();
 
@@ -361,12 +372,10 @@ sub child {
 				logger($self->{LOGFH},$self->{VERBOSE}, sprintf "!!child $pid exited with value %d\n", $? >> 8);
 			}
 	
-			$completedJobs{$self->{JOBNAME}} = $self->{CMD};
 			# it should not be necessary to pass $self here, not sure yet why it is necessary
 			$self->{updateStatus}($self,$self->{JOBNAME},$jobStatus,$rc,$startTime,$endTime,$elapsedTime);
-			logger($self->{LOGFH},$self->{VERBOSE}, "just updated completedJobs{$self->{JOBNAME}} = $self->{CMD}\n");
-			#decrementChildren();
 			exit $rc;
+
 		} else {
 			exit 0;
 		}
