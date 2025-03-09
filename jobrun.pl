@@ -85,7 +85,7 @@ usage(0) if $help;
 # assumed filename is name.extension
 my $resumableFile = (split(/[.]/,$jobFile))[0] . '.resume';
 
-if ( -f $resumableFile ) { $jobFile = $resumableFile; };
+if ( -f $resumableFile and $resumable ) { $jobFile = $resumableFile; };
 
 -r $configFile || croak "could not read $configFile - $!\n";
 -r $jobFile || croak "could not read $jobFile - $!\n";
