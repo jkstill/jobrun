@@ -21,10 +21,11 @@ use IO::File;
 use Data::Dumper;
 use Getopt::Long qw(:config pass_through) ;
 use lib './lib';
-use Jobrun qw(logger %allJobs);
+use Jobrun qw(logger);
 use sigtrap 'handler', sub{ cleanup(); exit; }, qw(QUIT TERM);
 use Proc::ProcessTable;
 use List::Util qw(any);
+use Carp;
 
 $Data::Dumper::Terse = 1; # to Eval whole thing as a hash
 $Data::Dumper::Indent = 1; # Looks better, just a preference
@@ -43,11 +44,12 @@ $SIG{'INT'} = 'IGNORE';
 my @programPath = split(/\//,$0);
 my $programName = $programPath[$#programPath];
 
-print "$programName\n";
+#print "$programName\n";
 
 my $configFile='jobrun.conf';
 my $jobFile='jobs.conf';
 
+my $pidFile = 'jobrun.pid';
 my %jobsToRun=();
 my %jobs=();
 my %config=();
@@ -59,11 +61,16 @@ my $maxjobs;
 my $exitNow=0;
 my $reloadConfigFile=0;
 my $getStatus=0;
+my $statusType='all';
 my $resumable;
 my $iterationSeconds;
 my $logfileBase;
 my $logfileSuffix;
 my $logdir;
+my $localControlTable = 'jobrun_control';
+my $localControlTableDefault = $localControlTable;
+my $localControlTableChanged = 0;
+my $snapshotControlTable = 0;
 
 GetOptions(
 	\%optctl,
@@ -80,10 +87,8 @@ my $resumableFile = (split(/[.]/,$jobFile))[0] . '.resume';
 
 if ( -f $resumableFile ) { $jobFile = $resumableFile; };
 
--r $configFile || die "could not read $configFile - $!\n";
--r $jobFile || die "could not read $jobFile - $!\n";
-
-%Jobrun::allJobs = %jobsToRun;
+-r $configFile || croak "could not read $configFile - $!\n";
+-r $jobFile || croak "could not read $jobFile - $!\n";
 
 #"reload-config!" => \$reloadConfigFile,
 
@@ -96,12 +101,21 @@ GetOptions(
 	"logdir=s"					=> \$logdir,
 	"verbose!"		=> \$verbose,
 	"status!"		=> \$getStatus,
+	"status-type=s"	=> \$statusType, # all, running, complete, error, failed
+	"control-table=s"	=> \$localControlTable,
+	"snapshot!"		=> \$snapshotControlTable,
 	"debug!"			=> \$debug,
 	"kill!"			=> \$exitNow,
 	"z!"				=> \$help,
 	"h!"				=> \$help,
 )  or  usage(1);
 
+
+$statusType =~ /^(all|running|complete|error|failed)$/ or croak "status-type must be one of all, running, complete, error, failed\n";
+
+if ( $localControlTable ne $localControlTableDefault ) {
+	$localControlTableChanged = 1;
+}
 
 # manual check for unknown arguments due to use of pass_through
 #print '@ARGV ' . Dumper(\@ARGV);
@@ -113,13 +127,10 @@ getKV($configFile,\%config);
 getKV($jobFile,\%jobsToRun);
 
 if ($verbose) {
-	banner('#',80,"\%config - $configFile") if $verbose;
+	banner('#',80,"\%config - $configFile");
 	showKV(\%config) if $verbose;
-	banner('#',80,"\%jobsToRun - $jobFile") if $verbose;
+	banner('#',80,"\%jobsToRun - $jobFile");
 	showKV(\%jobsToRun) if $verbose;
-	banner('#',80,'%Jobrun::allJobs') if $verbose;
-	#showKV(\%Jobrun::allJobs);
-	Jobrun::showAllJobs() if $verbose;
 }
 
 # trapping signals to run the status and reload config causes the 
@@ -139,11 +150,59 @@ if ( $reloadConfigFile ) {
 
 #=cut
 
+if ($snapshotControlTable) {
+	$localControlTable = $localControlTable . '_' . Jobrun::getTableTimeStamp();
+}
+
+=head1 Get status of currently running jobs
+
+The status is found in the jobrun_control table.
+
+The name of this table may be different if the --control-table option is used.
+
+The status may also be checked after the fact - the table is not deleted after the job completes.
+
+Conditions for getting the name of the control table:
+
+1. The name of the control table is passed on the command line with the --control-table option
+2. The name of the control table is found in the pid file
+3. The pid file is missing, and the name of the control table is passed on the command line
+
+=cut
+
 if ( $getStatus ) {
-	# send HUP to pid of main process
-	Jobrun::status(%config);
+
+	my $internalControlTable = $localControlTable;
+
+	if ( ! $localControlTableChanged ) {
+
+		{
+			local $@;
+			if (
+				eval { 
+					# this will fail if the pid file is missing
+					$localControlTable = getControlTableName();
+					return 1; 
+				}
+			) 
+			{
+				$internalControlTable = $localControlTable;
+				#warn "1 - internalControlTable: $internalControlTable\n";
+			} else {
+				$internalControlTable = $localControlTableDefault;
+				#warn "2 - internalControlTable: $internalControlTable\n";
+			}
+		}
+
+	}
+
+	#warn "internalControlTable: $internalControlTable\n";
+
+	Jobrun::status($internalControlTable,$statusType,%config);
 	exit 0;
 }
+
+Jobrun::setControlTable($localControlTable);
 
 # kill with -kill (-9). TERM, QUIT, etc do not work
 if ( $exitNow ) {
@@ -156,15 +215,16 @@ if ( $exitNow ) {
 	}
 	waitpid(0,0);
 	kill '-KILL', $mainPID;
-	unlink 'jobrun.pid';
+	unlink $pidFile;
 	exit 0;
 }
 
 use Fcntl qw(:flock);
-open our $file, '<', $0 or die $!;
-flock $file, LOCK_EX|LOCK_NB or die "Only 1 jobrun can be executing in the current directory-$!\n";
+open our $file, '<', $0 or croak $!;
+flock $file, LOCK_EX|LOCK_NB or croak "Only 1 jobrun can be executing in the current directory-$!\n";
 
-createPidFile();
+createPidFile($localControlTable);
+#exit;
 
 # load from config
 foreach my $configWord ( qw[ debug verbose resumable maxjobs logdir logfile-base logfile-suffix iteration-seconds ] ) {
@@ -185,7 +245,7 @@ $config{'iteration-seconds'} = $iterationSeconds if defined($iterationSeconds);
 my ($sec,$min,$hour,$mday,$mon,$year,$wday,$yday,$isdst) = localtime(time);
 
 my $logFile="$config{'logdir'}/$config{'logfile-base'}-${year}-${mon}-${mday}_${hour}-${min}-${sec}.$config{'logfile-suffix'}";
-my $logFileFH = IO::File->new($logFile,'w') or die "cannot open $logFile for write - $!\n";;
+my $logFileFH = IO::File->new($logFile,'w') or croak "cannot open $logFile for write - $!\n";;
 $|=1; # no buffer on output
 autoflush STDOUT 1;
 
@@ -204,6 +264,7 @@ if ($debug) {
 
 logger($logFileFH,$config{verbose}, "parent pid: $$\n:");
 
+Jobrun::setControlTable($localControlTable);
 # call this only once, as it will re-initialize the table
 Jobrun::init();
 
@@ -263,7 +324,7 @@ sub cleanup {
 	print "Current Children: " . Jobrun::getChildrenCount() . "\n";
 	logger($logFileFH,$config{verbose},"parent:$$ Current Children after wait: " . Jobrun::getChildrenCount() . "\n");
 
-	logger($logFileFH,$config{verbose},"All PIDs:\n" .  Dumper(\%Jobrun::jobPids));
+	#logger($logFileFH,$config{verbose},"All PIDs:\n" .  Dumper(\%Jobrun::jobPids));
 
 	my @jobrunPids = ();
 	foreach my $jobPid ( keys %Jobrun::jobPids ) {
@@ -271,36 +332,50 @@ sub cleanup {
 		push @jobrunPids, $pid;
 	}
 
-	logger($logFileFH,$config{verbose},"All Jobs:\n" .  Dumper(\%Jobrun::allJobs));
-	logger($logFileFH,$config{verbose},"Completed Jobs:\n" .  Dumper(\%Jobrun::completedJobs));
-	logger($logFileFH,$config{verbose},"Jobs Status:\n" .  Dumper(\%Jobrun::jobPids));
-
-	Jobrun::createResumableFile($resumableFile) if $resumable;
+	Jobrun::createResumableFile($resumableFile,\%jobsToRun) if $resumable;
 	# remove resumable file if it exists and is 0 bytes
 	Jobrun::cleanupResumableFile($resumableFile);
 
-	if ( -w 'jobrun.pid' ) {
-		unlink 'jobrun.pid;'
+	if ( -w $pidFile ) {
+		unlink $pidFile;
 	}
 
 }
 
 sub createPidFile {
-	open PIDFILE, '>', 'jobrun.pid' or die "could not create jobrun.pid - $!\n";
-	print PIDFILE "$$";
+	my $localControlTable = shift;
+	open PIDFILE, '>', $pidFile or croak "could not create $pidFile - $!\n";
+	print PIDFILE "$$\n";
+	print PIDFILE $localControlTable . "\n";
 	close PIDFILE;
 }
 
-sub getMainPid {
-	open PIDFILE, '<', 'jobrun.pid' or die "could not read jobrun.pid - $!\n";
+# get the name of the control table from the pid file
+# used for status checks, maybe others
+
+sub getControlTableName {
+	open PIDFILE, '<', $pidFile or croak "could not read $pidFile - $!\n";
 	my $pid  = <PIDFILE>;
+	my $controlTable = <PIDFILE>;
+	chomp $controlTable;
+	close PIDFILE;
+	return $controlTable;
+}
+
+
+# pid is the first line of the file
+# there may be other data in the file
+sub getMainPid {
+	open PIDFILE, '<', $pidFile or croak "could not read $pidFile - $!\n";
+	my $pid  = <PIDFILE>;
+	chomp $pid;
 	close PIDFILE;
 	return $pid;
 }
 
 sub getKV {
 	my ($configFile,$configRef) = @_;
-	open CFG, '<', $configFile || die "getKV() - could not open $configFile - $!\n";
+	open CFG, '<', $configFile || croak "getKV() - could not open $configFile - $!\n";
 	while (<CFG>) {
 		chomp;
 		next if /^#/;
@@ -386,6 +461,17 @@ print q{
   --maxjobs            number of jobs to run concurrently. default: 9
   --logfile-base       logfile basename. default: jobrun-sem
   --status             show status of currently running child jobs
+  --status-type        status type to show.
+                         all, running, completed, error, failed 
+                       default: all
+
+  --control-table      The control table to use. default: jobrun_control
+                       The control table will be found in the ./tables directory
+
+
+  --snapshot           adds a timestamp to the control table name
+							  this allows maintaining a history of of jobs that have been run
+
 
   --resumable          if the script is terminated with -TERM or -INT (CTL-C for instance)
                        a temporary job configuration file is created for jobs not completed
