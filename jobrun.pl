@@ -470,7 +470,7 @@ print q{
 
 
   --snapshot           adds a timestamp to the control table name
-							  this allows maintaining a history of of jobs that have been run
+                       this allows maintaining a history of of jobs that have been run
 
 
   --resumable          if the script is terminated with -TERM or -INT (CTL-C for instance)
