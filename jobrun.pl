@@ -104,6 +104,7 @@ GetOptions(
 	"status-type=s"	=> \$statusType, # all, running, complete, error, failed
 	"control-table=s"	=> \$localControlTable,
 	"snapshot!"		=> \$snapshotControlTable,
+	"reload-config!" => \$reloadConfigFile,
 	"debug!"			=> \$debug,
 	"kill!"			=> \$exitNow,
 	"z!"				=> \$help,
@@ -140,11 +141,12 @@ if ($verbose) {
 #=head1 non-working code
 
 if ( $reloadConfigFile ) {
-	warn "Reloading the config file not currently supported";
-	return;
+	#warn "Reloading the config file not currently supported";
+	#return;
 	# send HUP to pid of main process
 	my $mainPID = getMainPid();
-	kill 'USR1', $mainPID;
+	#kill 'USR1', $mainPID;
+	kill 'HUP', $mainPID;
 	exit 0;
 }
 
@@ -206,7 +208,6 @@ Jobrun::setControlTable($localControlTable);
 
 # kill with -kill (-9). TERM, QUIT, etc do not work
 if ( $exitNow ) {
-	# send HUP to pid of main process
 	my $mainPID = getMainPid();
 	my @childPids = Jobrun::getRunningJobPids();
 	print 'ChildPIDs: ' . Dumper(\@childPids);
@@ -268,6 +269,8 @@ Jobrun::setControlTable($localControlTable);
 # call this only once, as it will re-initialize the table
 Jobrun::init();
 
+$SIG{'HUP'} = 'IGNORE';
+
 while(1) {
 	
 	#last if $i++ > 10;
@@ -293,7 +296,11 @@ while(1) {
 	logger($logFileFH,$config{verbose},"parent:$$ child count " . Jobrun::getChildrenCount() . "\n");
 	last if $numberJobsToRun < 1;
 
+	# only reload the config file if the HUP signal is received during sleep
+	## not sure if that will work...
+   $SIG{HUP} = \&reloadConfig; # kill -1
 	sleep $config{'iteration-seconds'};
+	$SIG{'HUP'} = 'IGNORE';
 }
 
 banner('#',80,"\%config - $configFile");
@@ -402,10 +409,10 @@ sub banner {
 }
 
 sub reloadConfig {
-	#$SIG{'HUP'} = 'IGNORE';
+	$SIG{'HUP'} = 'IGNORE';
 	logger($logFileFH,$config{verbose},"parent:$$ reloading \%config\n");
 	getKV($configFile,\%config);
-	#$SIG{HUP} = \&reloadConfig; # kill -1
+	$SIG{HUP} = \&reloadConfig; # kill -1
 	return;
 }
 
