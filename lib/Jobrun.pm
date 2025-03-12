@@ -29,7 +29,11 @@ use lib '.';
 
 require Exporter;
 our @ISA= qw(Exporter);
-our @EXPORT_OK = qw(logger);
+our @EXPORT_OK = qw(
+	logger childSanityCheck createResumableFile cleanupResumableFile
+	getRunningJobPids microSleep getTimeStamp getTableTimeStamp
+	status getChildrenCount setControlTable getControlTable init
+);
 our @EXPORT = qw();
 our $VERSION = '0.01';
 
@@ -145,6 +149,30 @@ sub updateStatus {
 	#$dbh->commit();
 }
 
+# this is a sanity check for the child processes
+# validate that the child process is running
+# if not then update status as failed and -1 in exit_code
+sub childSanityCheck {
+	my ($logFileFH, $verbose) = @_;
+	logger($logFileFH,$verbose,"childSanityCheck()\n");
+	my $sth = $utilDBH->prepare("SELECT pid FROM $controlTable WHERE status = ?");
+	$sth->execute('running');
+	while (my $row = $sth->fetchrow_hashref) {
+
+		my $pid = $row->{pid};
+		logger($logFileFH,$verbose,"   pid: $pid\n");
+
+		my $rc = kill 0, $pid;
+		logger($logFileFH,$verbose,"    rc: $rc\n");
+
+		if ($rc == 0) {
+			my $dbh = createDbConnection();
+			my $sth = $dbh->prepare("UPDATE $controlTable SET status = ?, exit_code = ? WHERE pid = ?");
+			$sth->execute('failed',-1,$pid);
+		}
+	}
+}
+
 sub logger {
 	my $fh = shift @_;
 	my $verbose = shift @_;
@@ -212,9 +240,9 @@ sub status {
 	my $sql;
 	-r "$tableDir/${controlTable}.csv" or croak "table $tableDir/$controlTable.csv does not exist: $!\n";
 	if ($statusType eq 'all') {
-		$sql = "SELECT * FROM $controlTable order by start_time desc";
+		$sql = "SELECT * FROM $controlTable order by start_time asc";
 	} else {
-		$sql = "SELECT * FROM $controlTable WHERE status = '$statusType' order by start_time desc";
+		$sql = "SELECT * FROM $controlTable WHERE status = '$statusType' order by start_time asc";
 	}
 
 	print "table: $controlTable\n";
