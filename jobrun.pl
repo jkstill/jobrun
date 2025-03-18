@@ -21,7 +21,10 @@ use IO::File;
 use Data::Dumper;
 use Getopt::Long qw(:config pass_through) ;
 use lib './lib';
-use Jobrun qw(logger);
+use Jobrun qw(
+	logger childSanityCheck status getChildrenCount getRunningJobPids 
+	createResumableFile cleanupResumableFile setControlTable init getTableTimeStamp
+);
 use sigtrap 'handler', sub{ cleanup(); exit; }, qw(QUIT TERM);
 use Proc::ProcessTable;
 use List::Util qw(any);
@@ -153,7 +156,7 @@ if ( $reloadConfigFile ) {
 #=cut
 
 if ($snapshotControlTable) {
-	$localControlTable = $localControlTable . '_' . Jobrun::getTableTimeStamp();
+	$localControlTable = $localControlTable . '_' . getTableTimeStamp();
 }
 
 =head1 Get status of currently running jobs
@@ -200,16 +203,16 @@ if ( $getStatus ) {
 
 	#warn "internalControlTable: $internalControlTable\n";
 
-	Jobrun::status($internalControlTable,$statusType,%config);
+	status($internalControlTable,$statusType,%config);
 	exit 0;
 }
 
-Jobrun::setControlTable($localControlTable);
+setControlTable($localControlTable);
 
 # kill with -kill (-9). TERM, QUIT, etc do not work
 if ( $exitNow ) {
 	my $mainPID = getMainPid();
-	my @childPids = Jobrun::getRunningJobPids();
+	my @childPids = getRunningJobPids();
 	print 'ChildPIDs: ' . Dumper(\@childPids);
 	foreach my $pid ( @childPids ) {
 		kill '-KILL', $pid;
@@ -252,7 +255,7 @@ autoflush STDOUT 1;
 
 logger($logFileFH,$config{verbose},"==============================================================\n");
 
-my @jobQueue = keys %jobsToRun;
+my @jobQueue = sort keys %jobsToRun;
 my $numberJobsToRun = $#jobQueue + 1;
 
 if ($debug) {
@@ -265,9 +268,9 @@ if ($debug) {
 
 logger($logFileFH,$config{verbose}, "parent pid: $$\n:");
 
-Jobrun::setControlTable($localControlTable);
+setControlTable($localControlTable);
 # call this only once, as it will re-initialize the table
-Jobrun::init();
+init();
 
 $SIG{'HUP'} = 'IGNORE';
 
@@ -276,7 +279,7 @@ while(1) {
 	#last if $i++ > 10;
 	logger($logFileFH,$config{verbose},"parent:$$ main loop\n");
 
-	if ( Jobrun->getChildrenCount() < $config{maxjobs} and $numberJobsToRun > 0) {
+	if ( getChildrenCount() < $config{maxjobs} and $numberJobsToRun > 0) {
 		$numberJobsToRun--;
 		logger($logFileFH,$config{verbose},"parent:$$ Number of jobs left to run: $numberJobsToRun\n");
 		my $currJobName = shift @jobQueue;
@@ -293,16 +296,25 @@ while(1) {
 	}
 
 	logger($logFileFH,$config{verbose},"parent:$$ number of jobs to run: $numberJobsToRun\n");
-	logger($logFileFH,$config{verbose},"parent:$$ child count " . Jobrun::getChildrenCount() . "\n");
-	last if $numberJobsToRun < 1;
+	logger($logFileFH,$config{verbose},"parent:$$ child count " . getChildrenCount() . "\n");
+
+	last if $numberJobsToRun < 1 and getChildrenCount() < 1;
 
 	# only reload the config file if the HUP signal is received during sleep
 	## not sure if that will work...
    $SIG{HUP} = \&reloadConfig; # kill -1
 	sleep $config{'iteration-seconds'};
 	$SIG{'HUP'} = 'IGNORE';
+
+	# do a sanity check on the children
+	# make sure they are still running - one or more could have been killed
+	# if not running,update the control table as 'failed'
+	childSanityCheck($logFileFH,$config{verbose});
+
+>>>>>>> main
 }
 
+banner('#',80,"parent:$$ - all jobs completed\n");
 banner('#',80,"\%config - $configFile");
 showKV(\%config);
 banner('#',80,"\%jobsToRun - $jobFile");
@@ -316,20 +328,23 @@ exit;
 ## END OF MAIN
 ########################################
 #
+#
 
 sub cleanup {
 	# wait for jobs to finish
 	my $sleepTime = 2;
 
-	print "Current Children: " . Jobrun::getChildrenCount() . "\n";
-	logger($logFileFH,$config{verbose},"parent:$$ Current Children: " . Jobrun::getChildrenCount() . "\n");
-	while ( Jobrun::getChildrenCount() > 0 ) {
+	childSanityCheck($logFileFH,$config{verbose});
+
+	print "Current Children: " . getChildrenCount() . "\n";
+	logger($logFileFH,$config{verbose},"parent:$$ Current Children: " . getChildrenCount() . "\n");
+	while ( getChildrenCount() > 0 ) {
 		logger($logFileFH,$config{verbose},"parent:$$ " . "main: waiting for children to complete\n");
 		#sleep $config{'iteration-seconds'};
 		sleep $sleepTime;
 	}
-	print "Current Children: " . Jobrun::getChildrenCount() . "\n";
-	logger($logFileFH,$config{verbose},"parent:$$ Current Children after wait: " . Jobrun::getChildrenCount() . "\n");
+	print "Current Children: " . getChildrenCount() . "\n";
+	logger($logFileFH,$config{verbose},"parent:$$ Current Children after wait: " . getChildrenCount() . "\n");
 
 	#logger($logFileFH,$config{verbose},"All PIDs:\n" .  Dumper(\%Jobrun::jobPids));
 
@@ -339,9 +354,9 @@ sub cleanup {
 		push @jobrunPids, $pid;
 	}
 
-	Jobrun::createResumableFile($resumableFile,\%jobsToRun) if $resumable;
+	createResumableFile($resumableFile,\%jobsToRun) if $resumable;
 	# remove resumable file if it exists and is 0 bytes
-	Jobrun::cleanupResumableFile($resumableFile);
+	cleanupResumableFile($resumableFile);
 
 	if ( -w $pidFile ) {
 		unlink $pidFile;
