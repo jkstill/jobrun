@@ -74,6 +74,7 @@ my $localControlTable = 'jobrun_control';
 my $localControlTableDefault = $localControlTable;
 my $localControlTableChanged = 0;
 my $snapshotControlTable = 0;
+my $jobConfigTest = 0;
 
 GetOptions(
 	\%optctl,
@@ -93,25 +94,24 @@ if ( -f $resumableFile and $resumable ) { $jobFile = $resumableFile; };
 -r $configFile || croak "could not read $configFile - $!\n";
 -r $jobFile || croak "could not read $jobFile - $!\n";
 
-#"reload-config!" => \$reloadConfigFile,
-
 GetOptions(
 \%optctl,
-	"iteration-seconds=i"	=> \$iterationSeconds,
-	"maxjobs=i"					=> \$maxjobs,
-	"logfile-base=s"			=> \$logfileBase,
-	"logfile-suffix=s"		=> \$logfileSuffix,
-	"logdir=s"					=> \$logdir,
-	"verbose!"		=> \$verbose,
-	"status!"		=> \$getStatus,
-	"status-type=s"	=> \$statusType, # all, running, complete, error, failed
-	"control-table=s"	=> \$localControlTable,
-	"snapshot!"		=> \$snapshotControlTable,
-	"reload-config!" => \$reloadConfigFile,
-	"debug!"			=> \$debug,
-	"kill!"			=> \$exitNow,
-	"z!"				=> \$help,
-	"h!"				=> \$help,
+	"iteration-seconds=i"   => \$iterationSeconds,
+	"maxjobs=i"             => \$maxjobs,
+	"logfile-base=s"        => \$logfileBase,
+	"logfile-suffix=s"      => \$logfileSuffix,
+	"logdir=s"              => \$logdir,
+	"verbose!"              => \$verbose,
+	"status!"               => \$getStatus,
+	"status-type=s"         => \$statusType, # all, running, complete, error, failed
+	"control-table=s"       => \$localControlTable,
+	"snapshot!"             => \$snapshotControlTable,
+	"reload-config!"        => \$reloadConfigFile,
+	"job-config-test!"      => \$jobConfigTest,
+	"debug!"                => \$debug,
+	"kill!"                 => \$exitNow,
+	"z!"                    => \$help,
+	"h!"                    => \$help,
 )  or  usage(1);
 
 
@@ -137,18 +137,10 @@ if ($verbose) {
 	showKV(\%jobsToRun) if $verbose;
 }
 
-# trapping signals to run the status and reload config causes the 
-# main script to add more jobs
-# same if just --status is passed
-# leave here for future use
-#=head1 non-working code
-
 if ( $reloadConfigFile ) {
-	#warn "Reloading the config file not currently supported";
-	#return;
 	# send HUP to pid of main process
+	# this will signal the main running jobrun.pl to reload the config file
 	my $mainPID = getMainPid();
-	#kill 'USR1', $mainPID;
 	kill 'HUP', $mainPID;
 	exit 0;
 }
@@ -274,6 +266,18 @@ init();
 
 $SIG{'HUP'} = 'IGNORE';
 
+if ($jobConfigTest) {
+	$SIG{'INT'} = 'DEFAULT'; 
+	while(1) {
+   	$SIG{HUP} = \&reloadConfig; # kill -1
+		sleep $config{'iteration-seconds'};
+		$SIG{'HUP'} = 'IGNORE';
+		#showKV(\%config);
+		print "maxjobs: $config{maxjobs}\n";
+	}	
+	exit;
+}
+
 while(1) {
 	
 	#last if $i++ > 10;
@@ -301,9 +305,10 @@ while(1) {
 	last if $numberJobsToRun < 1 and getChildrenCount() < 1;
 
 	# only reload the config file if the HUP signal is received during sleep
-	## not sure if that will work...
+	# seems to work
    $SIG{HUP} = \&reloadConfig; # kill -1
 	sleep $config{'iteration-seconds'};
+	print "maxjobs: $config{maxjobs}\n" if $config{verbose};
 	$SIG{'HUP'} = 'IGNORE';
 
 	# do a sanity check on the children
@@ -311,7 +316,6 @@ while(1) {
 	# if not running,update the control table as 'failed'
 	childSanityCheck($logFileFH,$config{verbose});
 
->>>>>>> main
 }
 
 banner('#',80,"parent:$$ - all jobs completed\n");
@@ -501,7 +505,7 @@ print q{
 
   --kill               kill the current child jobs and parent
   --logfile-suffix     logfile suffix. default: log
-  --reload-config      reload the config file
+  --reload-config      signal main jobrun.pl process to reload the config file
   --verbose            print more messages: default: 1 or on
   --debug              print debug messages: default: 1 or on
   --help               show this help.
