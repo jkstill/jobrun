@@ -166,11 +166,7 @@ maxConcurrentJobs: 3
 
 ```text
   ./jobrun.pl -h
-jobrun.pl
-
-
 usage: jobrun.pl
-
 
   The default values are found in jobrun.conf, and can be changed.
 
@@ -178,8 +174,27 @@ usage: jobrun.pl
   --job-config-file    jobs config file. default: jobs.conf
   --iteration-seconds  seconds between checks to run more jobs. default: 10
   --maxjobs            number of jobs to run concurrently. default: 9
-  --logfile            logfile basename. default: jobrun-sem
+  --logfile-base       logfile basename. default: jobrun-sem
+  --status             show status of currently running child jobs
+  --status-type        status type to show.
+                         all, running, completed, error, failed
+                       default: all
+
+  --control-table      The control table to use. default: jobrun_control
+                       The control table will be found in the ./tables directory
+
+
+  --snapshot           adds a timestamp to the control table name
+                       this allows maintaining a history of of jobs that have been run
+
+
+  --resumable          if the script is terminated with -TERM or -INT (CTL-C for instance)
+                       a temporary job configuration file is created for jobs not completed
+                       this file will be used to restart if --resumable is again used
+
+  --kill               kill the current child jobs and parent
   --logfile-suffix     logfile suffix. default: log
+  --reload-config      signal main jobrun.pl process to reload the config file
   --verbose            print more messages: default: 1 or on
   --debug              print debug messages: default: 1 or on
   --help               show this help.
@@ -188,16 +203,21 @@ Example:
 
   ./jobrun.pl --logfile-suffix=load-log --job-config-file dbjobs.conf --maxjobs 1 --nodebug --noverbose
 
+  ./jobrun.pl --verbose --resumable --iteration-seconds 2 --config-file perl-run.conf --job-config-file perl-jobs.conf
 
  When jobrun.pl starts, it will create a file 'jobrun.pid' in the current directory.
 
- There are traps on the HUP, INT, TERM and QUIT signals.
+ There are traps on the INT, TERM and QUIT signals.
 
  Pressing CTL-C will not stop jobrun, but it will print a status message.
 
- Pressing CTL-\ will kill the program and cleanup semaphores
+ Pressing CTL-\ should kill the program and children.
 
- The config file can be reloaded with HUB.
+ 'jorun.pl --kill' will kill the parent and children immediately if CTL-\ does not work.
+
+ The config file can be reloaded by sending the HUP signal to the current jobrun.pl parent process.
+
+ Or just run './jobrun.pl' --reload-config.
 
  Say you have started jobrun with the --noverbose and --nodebug flags, but would now like to change
  that so that more info appears on screen.
@@ -217,7 +237,8 @@ Example:
 
  It may take a few moments for the chilren to die.
 
- The fastest method to stop jobrun is CTL-\
+ The fastest method to stop jobrun is 'jobrun.pl --kill'
+
 ```
 
 ### Help - jobrun.sh
@@ -245,15 +266,6 @@ Example:
 
 ### Things to implement
 
-- track job by pid, job name and status
-- resumable - persist status and results
-  (done in bash version)
-  - option - set a jobrun ID for the batch of jobs
-    - used to identify file
-	 - or maybe just a name for the results file
-	 - skip jobs that have already run and have status == 1
-  - option - rerun or not rerun failed jobs - status == 2
-- check if job running when status == 2
 - option - use system metric to throttle number of jobs
   - for OS - could be load (bad idea, I know, just an example)
   - for Oracle - check AAS - allow up to N jobs to run where N == Cores/2
