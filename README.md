@@ -275,5 +275,6 @@ Example:
   - some kind of reporting
   - record the error code from the called program
     - sqlldr for instance returns 0 for success, 1-4 for various warnings and errors
+    - [SQLLDR Exit Codes](https://docs.oracle.com/en/database/oracle/oracle-database/19/sutil/oracle-sql-loader-commands.html#GUID-FDC9B490-7C23-4DEF-B826-9FDAEAF0FA64)
 
 
