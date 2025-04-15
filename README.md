@@ -266,6 +266,15 @@ Example:
 
 ### ToDo: Things to implement
 
+- correct the line terminator in the jobrun control table
+  - it has CRLF line terminators
+  - ```text
+     $ file tables/jobrun_control_2025_04_15_06_52_26.csv
+     tables/jobrun_control_2025_04_15_06_52_26.csv: ASCII text, with CRLF line terminators
+```
+- populate elapsed time for currently running jobs
+  - this is normally updated by the child process
+  - maybe a separate process to update the elapsed time?
 - option - use system metric to throttle number of jobs
   - for OS - could be load (bad idea, I know, just an example)
   - for Oracle - check AAS - allow up to N jobs to run where N == Cores/2
