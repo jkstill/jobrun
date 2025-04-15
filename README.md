@@ -264,7 +264,7 @@ Example:
   -h  help
 ```
 
-### Things to implement
+### ToDo: Things to implement
 
 - option - use system metric to throttle number of jobs
   - for OS - could be load (bad idea, I know, just an example)
@@ -273,5 +273,7 @@ Example:
   - in main config - manually set a threshold value for chosen metric
 - results
   - some kind of reporting
+  - record the error code from the called program
+    - sqlldr for instance returns 0 for success, 1-4 for various warnings and errors
 
 
