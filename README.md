@@ -272,6 +272,9 @@ Example:
      $ file tables/jobrun_control_2025_04_15_06_52_26.csv
      tables/jobrun_control_2025_04_15_06_52_26.csv: ASCII text, with CRLF line terminators
 ```
+- include the child PID in the control table
+  - perl forks and calls the job to run, so we need the child PID
+  - this will identify the job in the control table and the log files
 - populate elapsed time for currently running jobs
   - this is normally updated by the child process
   - maybe a separate process to update the elapsed time?
