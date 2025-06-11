@@ -1,425 +1,323 @@
-# Jared Still
-# 2024-05-21
-# jkstill@gmail.com
-#
-# use to fork a process to run a job
-# jobrun.pl is the front end
-######################################################
-
-=head1 Jobrun.pm
-
-TODO
-
-=cut
+# Jared Still 2024-05-21 <jkstill\@gmail.com>
+# Refactored to use Moo without changing functionality
 
 package Jobrun;
 
+use Moo;
 use warnings;
 use strict;
 use Data::Dumper;
-use File::Temp qw/ :seekable tmpnam/;
+use File::Temp qw/:seekable tmpnam/;
 use DBI;
 use Carp;
 use IO::File;
-use POSIX       qw(strftime);
+use POSIX qw(strftime);
 use Time::HiRes qw(time usleep);
+use Exporter qw(import);
 
-use lib '.';
-
-require Exporter;
-our @ISA       = qw(Exporter);
+# Exportable functions
 our @EXPORT_OK = qw(
-	logger childSanityCheck createResumableFile cleanupResumableFile
-	getRunningJobPids microSleep getTimeStamp getTableTimeStamp
-	status getChildrenCount setControlTable getControlTable init
+  logger
+  childSanityCheck
+  createResumableFile
+  cleanupResumableFile
+  getRunningJobPids
+  microSleep
+  getTimeStamp
+  getTableTimeStamp
+  status
+  getChildrenCount
+  setControlTable
+  getControlTable
+  init
 );
+
 our $VERSION = '0.01';
 
+# directory for CSV control tables
 my $tableDir = './tables';
 mkdir $tableDir unless -d $tableDir;
 -d $tableDir or croak "table directory $tableDir not created: $!\n";
 
+# global control table name and utilDBH
 my $controlTable;
+my $utilDBH;
 
+# functional interface to set/get control table
 sub setControlTable {
-	$controlTable = shift;
-	return;
+    $controlTable = shift;
 }
 
 sub getControlTable {
-	return $controlTable;
+    return $controlTable;
 }
 
-# call this just once from the driver script jobrun.pl
-my $utilDBH;
-
+# functional init: prepare CSV table
 sub init {
-	$utilDBH = createDbConnection();
-	createTable();
-	truncateTable();
-	return;
+    $utilDBH = createDbConnection();
+    createTable();
+    truncateTable();
 }
 
+# create DBI connection for CSV
 sub createDbConnection {
-	my $dbh = DBI->connect(
-		"dbi:CSV:",
-		undef, undef,
-		{
-			f_ext      => ".csv",
-			f_dir      => $tableDir,
-			flock      => 2,
-			RaiseError => 1,
-		}
-		)
-		or croak "Cannot connect: $DBI::errstr";
-
-	return $dbh;
+    my $dbh = DBI->connect(
+        "dbi:CSV:",
+        undef,
+        undef,
+        { f_ext => ".csv", f_dir => $tableDir, flock => 2, RaiseError => 1 }
+    ) or croak "Cannot connect: $DBI::errstr";
+    return $dbh;
 }
 
-# add start,end,elapsed time to table
-
+# create control table if it does not exist
 sub createTable {
-
-	# create table if it does not exist
-	eval {
-		local $utilDBH->{RaiseError} = 1;
-		local $utilDBH->{PrintError} = 0;
-
-		$utilDBH->do(
-			qq{CREATE TABLE $controlTable (
-				name CHAR(50)
-				, pid CHAR(12)
-				, status CHAR(20)
-				, start_time CHAR(30)
-				, end_time CHAR(30)
-				, elapsed_time CHAR(20)
-				, exit_code CHAR(10)
-				, cmd CHAR(200))
-			}
-		);
-
-	};
-
-	#if ($@) {
-	#print "Error: $@\n";
-	#print "Table most likely already exists\n";
-	#}
-
-	return;
+    eval {
+        local $utilDBH->{RaiseError} = 1;
+        local $utilDBH->{PrintError} = 0;
+        $utilDBH->do(qq{
+            CREATE TABLE $controlTable (
+                name CHAR(50),
+                pid CHAR(12),
+                status CHAR(20),
+                start_time CHAR(30),
+                end_time CHAR(30),
+                elapsed_time CHAR(20),
+                exit_code CHAR(10),
+                cmd CHAR(200)
+            )
+        });
+    };
 }
 
+# clear any existing rows
 sub truncateTable {
-	$utilDBH = createDbConnection();
-	$utilDBH->do("DELETE FROM $controlTable");
-	return;
+    $utilDBH = createDbConnection();
+    $utilDBH->do("DELETE FROM $controlTable");
 }
 
-sub insertTable {
-	my ( $self, $name, $pid, $status, $startTime, $endTime, $elapsedTime, $exit_code, $cmd ) = @_;
+# Moo attributes for OO interface
+has 'dbh' => (
+    is      => 'ro',
+    lazy    => 1,
+    builder => '_build_dbh',
+);
 
-	#print 'insertTable SELF: ' . Dumper($self);
-	my $dbh = $self->{dbh};
-	my $sth = $dbh->prepare("INSERT INTO $controlTable (name,pid,status,start_time,end_time,elapsed_time,exit_code,cmd) VALUES (?,?,?,?,?,?,?,?)");
-	$sth->execute( $name, $pid, $status, $startTime, $endTime, $elapsedTime, $exit_code, $cmd );
-
-	# DBD::CSV always autocommits
-	# this is here in the event that we use a different DBD
-	#$dbh->commit();
-	return;
+sub _build_dbh {
+    return createDbConnection();
 }
 
-sub deleteTable {
-	my ( $self, $name ) = @_;
-	my $dbh = $self->{dbh};
-	my $sth = $dbh->prepare("DELETE FROM $controlTable WHERE name = ?");
-	$sth->execute($name);
+has 'JOBNAME' => (
+    is       => 'ro',
+    required => 1,
+);
 
-	#$dbh->commit();
-	return;
+has 'CMD' => (
+    is       => 'ro',
+    required => 1,
+);
+
+has 'LOGFH' => (
+    is      => 'ro',
+    default => sub { *STDOUT },
+);
+
+has 'VERBOSE' => (
+    is      => 'ro',
+    default => sub { 0 },
+);
+
+# called after object construction
+sub BUILD {
+    my ($self, $args) = @_;
+    my ($user, undef, $uid) = getpwuid($<) or croak "getpwuid: $!";
+    print "User: $user, UID: $uid\n";
+    # initial insert into control table
+    $self->insert(
+        $self->JOBNAME,
+        $$,
+        'running',  # status
+        'NA',       # exit_code (note: original ordering)
+        '',         # start_time
+        '',         # end_time
+        '',         # elapsed_time
+        $self->CMD  # cmd
+    );
 }
 
-sub selectTable {
-	my ( $self, $column, $value ) = @_;
-	my $dbh = $self->{dbh};
-	my $sth = $dbh->prepare("SELECT * FROM $controlTable WHERE ? = ?");
-	$sth->execute( $column, $value );
-	my $hashRef = $sth->fetchall_hashref;
-	return $hashRef;
+# OO methods mirror original subs
+sub insert {
+    my ($self, $name, $pid, $status, $exit_code, $startTime, $endTime, $elapsedTime, $cmd) = @_;
+    my $sth = $self->dbh->prepare(
+        "INSERT INTO $controlTable (name,pid,status,start_time,end_time,elapsed_time,exit_code,cmd) VALUES (?,?,?,?,?,?,?,?)"
+    );
+    $sth->execute($name, $pid, $status, $startTime, $endTime, $elapsedTime, $exit_code, $cmd);
 }
 
-# only updates status and exit_code
+sub delete {
+    my ($self, $name) = @_;
+    my $sth = $self->dbh->prepare("DELETE FROM $controlTable WHERE name = ?");
+    $sth->execute($name);
+}
+
+sub select {
+    my ($self, $column, $value) = @_;
+    my $sth = $self->dbh->prepare("SELECT * FROM $controlTable WHERE ? = ?");
+    $sth->execute($column, $value);
+    return $sth->fetchall_hashref;
+}
+
 sub updateStatus {
-	my ( $self, $name, $status, $exit_code, $startTime, $endTime, $elapsedTime ) = @_;
-	my $dbh = $self->{dbh};
-	my $sth = $dbh->prepare("UPDATE $controlTable SET status = ?, exit_code = ?, start_time = ? , end_time = ?, elapsed_time = ?  WHERE name = ?");
-	$sth->execute( $status, $exit_code, $startTime, $endTime, $elapsedTime, $name );
-
-	#$dbh->commit();
-	return;
+    my ($self, $name, $status, $exit_code, $startTime, $endTime, $elapsedTime) = @_;
+    my $sth = $self->dbh->prepare(
+        "UPDATE $controlTable SET status = ?, exit_code = ?, start_time = ?, end_time = ?, elapsed_time = ? WHERE name = ?"
+    );
+    $sth->execute($status, $exit_code, $startTime, $endTime, $elapsedTime, $name);
 }
 
-# this is a sanity check for the child processes
-# validate that the child process is running
-# if not then update status as failed and -1 in exit_code
+# functional subs that do not require object
 sub childSanityCheck {
-	my ( $logFileFH, $verbose ) = @_;
-	logger( $logFileFH, $verbose, "childSanityCheck()\n" );
-	my $sth = $utilDBH->prepare("SELECT pid FROM $controlTable WHERE status = ?");
-	$sth->execute('running');
-	while ( my $row = $sth->fetchrow_hashref ) {
-
-		my $pid = $row->{pid};
-		logger( $logFileFH, $verbose, "   pid: $pid\n" );
-
-		my $rc = kill 0, $pid;
-		logger( $logFileFH, $verbose, "    rc: $rc\n" );
-
-		if ( $rc == 0 ) {
-			my $dbh = createDbConnection();
-			my $sth = $dbh->prepare("UPDATE $controlTable SET status = ?, exit_code = ? WHERE pid = ?");
-			$sth->execute( 'failed', -1, $pid );
-		}
-	}
-	return;
+    my ($logFileFH, $verbose) = @_;
+    logger($logFileFH, $verbose, "childSanityCheck()\n");
+    my $sth = $utilDBH->prepare("SELECT pid FROM $controlTable WHERE status = ?");
+    $sth->execute('running');
+    while (my $row = $sth->fetchrow_hashref) {
+        my $pid = $row->{pid};
+        logger($logFileFH, $verbose, " pid: $pid\n");
+        my $rc = kill 0, $pid;
+        logger($logFileFH, $verbose, " rc: $rc\n");
+        if ($rc == 0) {
+            my $dbh = createDbConnection();
+            my $sth2 = $dbh->prepare("UPDATE $controlTable SET status = ?, exit_code = ? WHERE pid = ?");
+            $sth2->execute('failed', -1, $pid);
+        }
+    }
 }
 
 sub logger {
-	my ( $fh, $verbose, @msg ) = @_;
-	while (@msg) {
-		my $line = shift @msg;
-		$fh->print($line);
-		print "$line" if $verbose;
-	}
-	return;
-}
-
-sub new {
-	my ( $pkg, %args ) = @_;
-	my $class = ref($pkg) || $pkg;
-
-	#print "Class: $class\n";
-
-	$args{dbh} = createDbConnection();
-
-	$args{insert}       = \&insertTable;
-	$args{updateStatus} = \&updateStatus;
-	$args{delete}       = \&deleteTable;
-	$args{select}       = \&selectTable;
-
-	# name,pid,status,start_time,end_time,elapsed_time,exit_code,cmd) VALUES (?,?,?,?,?)");
-
-	$args{columnNamesByName}  = { name => 0,      pid => 1,     cmd => 2,     status => 3,        exit_code => 4 };
-	$args{columnNamesByIndex} = { 0    => 'name', 1   => 'pid', 2   => 'cmd', 3      => 'status', 4         => 'exit_code' };
-	$args{columnValues}       = [qw/undef undef undef undef undef/];
-
-	my ( $user, $passwd, $uid, $gid, $quota, $comment, $gcos, $dir, $shell, $expire ) = getpwuid($<) or croak "getpwuid: $!";
-	print "User: $user, UID: $uid\n";
-
-	my $retval = bless \%args, $class;
-
-	$retval->{insert}(
-		$retval,
-		$retval->{JOBNAME},    #job name
-		$$,                    #pid
-		, 'running'            #status
-		, 'NA'                 #exit code
-		, ''                   #start time
-		, ''                   #end time
-		, ''                   #elapsed time
-		, $retval->{CMD},      #command
-
-	);
-	return $retval;
+    my ($fh, $verbose, @msg) = @_;
+    for my $line (@msg) {
+        $fh->print($line);
+        print $line if $verbose;
+    }
 }
 
 sub getChildrenCount {
-
-	# Return current child count
-	my $sth = $utilDBH->prepare("SELECT count(*) child_count FROM $controlTable WHERE status = 'running'");
-	$sth->execute();
-	my $row = $sth->fetchrow_hashref;
-	return $row->{child_count} ? $row->{child_count} : 0;
+    my $sth = $utilDBH->prepare("SELECT count(*) child_count FROM $controlTable WHERE status = 'running'");
+    $sth->execute();
+    my $row = $sth->fetchrow_hashref;
+    return $row->{child_count} ? $row->{child_count} : 0;
 }
 
-# status is called as a separate process
-# and will have not knowledge of the Jobrun object
-# so we need to pass the controlTable name
 sub status {
-	my ( $controlTable, $statusType, %config ) = @_;
-	my $dbh = createDbConnection();
-	my $sql;
-	-r "$tableDir/${controlTable}.csv" or croak "table $tableDir/$controlTable.csv does not exist: $!\n";
-	if ( $statusType eq 'all' ) {
-		$sql = "SELECT * FROM $controlTable order by start_time asc";
-	}
-	else {
-		$sql = "SELECT * FROM $controlTable WHERE status = '$statusType' order by start_time asc";
-	}
-
-	print "table: $controlTable\n";
-
-	my $sth = $dbh->prepare($sql);
-	$sth->execute();
-
-	# %-$config{colLenSTART_TIME}s %-$config{colLenEND_TIME}s %-$config{colLenELAPSED_TIME}s
-	printf "%-$config{colLenNAME}s %-$config{colLenPID}s %-$config{colLenSTATUS}s %-$config{colLenEXIT_CODE}s %-$config{colLenSTART_TIME}s %-$config{colLenEND_TIME}s %-$config{colLenELAPSED_TIME}s %-$config{colLenCMD}s\n", 'name', 'pid', 'status', 'exit_code', 'start_time', 'end_time', 'elapsed', 'cmd';
-
-	printf "%-$config{colLenNAME}s %-$config{colLenPID}s %-$config{colLenSTATUS}s %-$config{colLenEXIT_CODE}s %-$config{colLenSTART_TIME}s %-$config{colLenEND_TIME}s %-$config{colLenELAPSED_TIME}s %-$config{colLenCMD}s\n", '-' x $config{colLenNAME}, '-' x $config{colLenPID}, '-' x $config{colLenSTATUS}, '-' x $config{colLenEXIT_CODE}, '-' x $config{colLenSTART_TIME}, '-' x $config{colLenEND_TIME}, '-' x $config{colLenELAPSED_TIME}, '-' x $config{colLenCMD};
-	while ( my $row = $sth->fetchrow_hashref ) {
-		my $rowlen = length( $row->{cmd} ) + 0;
-
-		#warn "rowlen: $rowlen\n";
-		printf "%-$config{colLenNAME}s %-$config{colLenPID}s %-$config{colLenSTATUS}s %-$config{colLenEXIT_CODE}s %-$config{colLenSTART_TIME}s %-$config{colLenEND_TIME}s %$config{colLenELAPSED_TIME}s %-$config{colLenCMD}s\n", $row->{name}, $row->{pid}, $row->{status}, $row->{exit_code}, $row->{start_time}, $row->{end_time}, sprintf( '%6.6f', $row->{elapsed_time} ? $row->{elapsed_time} : 0 ),
-			substr(
-			  $row->{cmd}, defined( $config{colCmdStartPos} ) ? $config{colCmdStartPos} : 0, defined( $config{colCmdEndPos} )
-			? $config{colCmdEndPos}
-			: ( $rowlen - 1 ),
-			);
-	}
-	return;
+    my ($controlTableName, $statusType, %config) = @_;
+    my $dbh = createDbConnection();
+    my $sql;
+    -r "$tableDir/${controlTableName}.csv" or croak "table $tableDir/$controlTableName.csv does not exist: $!\n";
+    if ($statusType eq 'all') {
+        $sql = "SELECT * FROM $controlTableName order by start_time asc";
+    } else {
+        $sql = "SELECT * FROM $controlTableName WHERE status = '$statusType' order by start_time asc";
+    }
+    print "table: $controlTableName\n";
+    my $sth = $dbh->prepare($sql);
+    $sth->execute();
+    # header
+    printf "%-$config{colLenNAME}s %-$config{colLenPID}s %-$config{colLenSTATUS}s %-$config{colLenEXIT_CODE}s %-$config{colLenSTART_TIME}s %-$config{colLenEND_TIME}s %-$config{colLenELAPSED_TIME}s %-$config{colLenCMD}s\n",
+        'name','pid','status','exit_code','start_time','end_time','elapsed','cmd';
+    printf "%-$config{colLenNAME}s %-$config{colLenPID}s %-$config{colLenSTATUS}s %-$config{colLenEXIT_CODE}s %-$config{colLenSTART_TIME}s %-$config{colLenEND_TIME}s %-$config{colLenELAPSED_TIME}s %-$config{colLenCMD}s\n",
+        '-' x $config{colLenNAME}, '-' x $config{colLenPID}, '-' x $config{colLenSTATUS}, '-' x $config{colLenEXIT_CODE}, '-' x $config{colLenSTART_TIME}, '-' x $config{colLenEND_TIME}, '-' x $config{colLenELAPSED_TIME}, '-' x $config{colLenCMD};
+    while (my $row = $sth->fetchrow_hashref) {
+        printf "%-$config{colLenNAME}s %-$config{colLenPID}s %-$config{colLenSTATUS}s %-$config{colLenEXIT_CODE}s %-$config{colLenSTART_TIME}s %-$config{colLenEND_TIME}s %$config{colLenELAPSED_TIME}s %-$config{colLenCMD}s\n",
+            $row->{name}, $row->{pid}, $row->{status}, $row->{exit_code}, $row->{start_time}, $row->{end_time}, sprintf('%6.6f', $row->{elapsed_time} ? $row->{elapsed_time} : 0),
+            substr($row->{cmd}, defined $config{colCmdStartPos} ? $config{colCmdStartPos} : 0, defined $config{colCmdEndPos} ? $config{colCmdEndPos} : (length $row->{cmd} -1));
+    }
 }
 
 sub createResumableFile {
-	my ( $resumableFileName, $jobsHashRef ) = @_;
-
-	my $fh = IO::File->new();
-	$fh->open( $resumableFileName, '>' ) or croak "could not create resumable file - $resumableFileName: $!\n";
-
-	my $dbh = createDbConnection();
-
-	# cannot figure  out use to get '!=' or 'not in' to work with DBD::CSV
-	# in DBD::CSV  :
-	#    '!=' is not supported
-	#    '<>' is not supported
-	#    'NOT IN' must be capitalized - not sure if this is a bug or by design
-	my $sql = "SELECT name,status FROM $controlTable WHERE status NOT IN ('complete')";
-	my $sth = $dbh->prepare($sql);
-	$sth->execute();
-	while ( my @row = $sth->fetchrow_array ) {
-		$fh->print( "$row[0]" . ':' . "$jobsHashRef->{$row[0]}\n" );
-	}
-	return;
+    my ($resumableFileName, $jobsHashRef) = @_;
+    my $fh = IO::File->new();
+    $fh->open($resumableFileName, '>') or croak "could not create resumable file - $resumableFileName: $!\n";
+    my $dbh = createDbConnection();
+    my $sql = "SELECT name,status FROM $controlTable WHERE status NOT IN ('complete')";
+    my $sth = $dbh->prepare($sql);
+    $sth->execute();
+    while (my @row = $sth->fetchrow_array) {
+        $fh->print("$row[0]:$jobsHashRef->{$row[0]}\n");
+    }
 }
 
-# remove the file if empty
 sub cleanupResumableFile {
-	my ($resumableFileName) = @_;
-	-z $resumableFileName && unlink $resumableFileName;
-	return;
+    my ($resumableFileName) = @_;
+    -z $resumableFileName && unlink $resumableFileName;
 }
 
-# this may be called with --kill, so we need to create a connection
 sub getRunningJobPids {
-	my $dbh = createDbConnection();
-	my $sth = $dbh->prepare("SELECT pid FROM $controlTable WHERE status = 'running'");
-	$sth->execute();
-	my @jobPids;
-	while ( my $row = $sth->fetchrow_hashref ) {
-		push @jobPids, $row->{pid};
-	}
-	return @jobPids;
+    my $dbh = createDbConnection();
+    my $sth = $dbh->prepare("SELECT pid FROM $controlTable WHERE status = 'running'");
+    $sth->execute();
+    my @jobPids;
+    while (my $row = $sth->fetchrow_hashref) {
+        push @jobPids, $row->{pid};
+    }
+    return @jobPids;
 }
 
 sub microSleep {
-	my $microseconds = shift;
-	usleep( ( $microseconds / 1000000 ) * 1000000 );
-	return;
+    my $microseconds = shift;
+    usleep(($microseconds / 1_000_000) * 1_000_000);
 }
 
 sub getTimeStamp {
-	my @t = [Time::HiRes::gettimeofday]->@*;
-	return strftime( "%Y-%m-%d %H:%M:%S", localtime $t[0] ) . "." . $t[1];
+    my @t = [Time::HiRes::gettimeofday]->@*;
+    return strftime("%Y-%m-%d %H:%M:%S", localtime $t[0]) . "." . $t[1];
 }
 
 sub getTableTimeStamp {
-	my @t = [Time::HiRes::gettimeofday]->@*;
-	return strftime( "%Y_%m_%d_%H_%M_%S", localtime $t[0] );
+    my @t = [Time::HiRes::gettimeofday]->@*;
+    return strftime("%Y_%m_%d_%H_%M_%S", localtime $t[0]);
 }
 
 sub child {
-	my ( $self, $jobName, $cmd ) = @_;
-
-	#print 'SELF: ' . Dumper($self);
-	my $grantParentPID = $$;
-
-	my $child = fork();
-
-	#croak("Can't fork: $!") unless defined ($child = fork());
-	croak("Can't fork #1: $!") unless defined($child);
-
-	if ($child) {
-		logger( $self->{LOGFH}, $self->{VERBOSE}, "child:$$  cmd:$self->{CMD}\n" );
-
-	}
-	else {
-		my $parentPID  = $$;
-		my $grandChild = fork();
-		croak("Can't fork #2: $!") unless defined($grandChild);
-
-		if ( $grandChild == 0 ) {
-
-			# use system() here
-			#qx/$cmd/;
-			my $pid = $$;
-			logger( $self->{LOGFH}, $self->{VERBOSE}, "#######################################\n" );
-			logger( $self->{LOGFH}, $self->{VERBOSE}, "## job name: $self->{JOBNAME} child pid: $pid\n" );
-			logger( $self->{LOGFH}, $self->{VERBOSE}, "#######################################\n" );
-			my $dbh = $self->{dbh};
-			my $sth = $dbh->prepare("UPDATE $controlTable SET pid = ? WHERE name = ?");
-			$sth->execute( $pid, $self->{JOBNAME} );
-
-			#$dbh->commit();
-
-			#$jobPids{$self->{JOBNAME}} = "$pid:running";
-
-			#logger($self->{LOGFH},$self->{VERBOSE}, "grandChild:$pid:running\n");
-			##
-			#logger($self->{LOGFH} ,$self->{VERBOSE}, "grancChild:$pid running job $self->{JOBNAME}\n");
-			# run the command here
-			my $startTime = getTimeStamp();
-			my @t0        = [Time::HiRes::gettimeofday]->@*;
-			$self->{updateStatus}( $self, $self->{JOBNAME}, 'running', '', $startTime, '', '' );
-			system( $self->{CMD} );
-			my $rc      = $? >> 8;
-			my @t1      = [Time::HiRes::gettimeofday]->@*;
-			my $endTime = getTimeStamp();
-
-			my $elapsedTime = sprintf( "%.6f", Time::HiRes::tv_interval( \@t0, \@t1 ) );
-
-			if ( $rc != 0 ) {
-				logger( $self->{LOGFH}, $self->{VERBOSE}, "#######################################\n" );
-				logger( $self->{LOGFH}, $self->{VERBOSE}, "## error with $self->{JOBNAME}\n" );
-				logger( $self->{LOGFH}, $self->{VERBOSE}, "## CMD: $self->{CMD}\n" );
-				logger( $self->{LOGFH}, $self->{VERBOSE}, "#######################################\n" );
-			}
-
-			my $jobStatus = 'complete';
-			if ( $rc == -1 ) {
-				$jobStatus = 'failed';
-				logger( $self->{LOGFH}, $self->{VERBOSE}, "!!failed to execute: $!\n" );
-			}
-			elsif ( $rc & 127 ) {
-				$jobStatus = 'error';
-				logger( $self->{LOGFH}, $self->{VERBOSE}, sprintf "!!child $pid died with signal %d, %s coredump\n", ( $rc & 127 ), ( $rc & 128 ) ? 'with' : 'without' );
-			}
-			else {
-				logger( $self->{LOGFH}, $self->{VERBOSE}, sprintf "!!child $pid exited with value %d\n", $? >> 8 );
-			}
-
-			# it should not be necessary to pass $self here, not sure yet why it is necessary
-			$self->{updateStatus}( $self, $self->{JOBNAME}, $jobStatus, $rc, $startTime, $endTime, $elapsedTime );
-			exit $rc;
-
-		}
-		else {
-			exit 0;
-		}
-
-	}
-
-	waitpid( $child, 0 );
-	return;
+    my ($self, $jobName, $cmd) = @_;
+    my $grantParentPID = $$;
+    my $child = fork();
+    croak("Can't fork #1: $!\n") unless defined $child;
+    if ($child) {
+        logger($self->LOGFH, $self->VERBOSE, "child:$$ cmd:$self->CMD\n");
+    } else {
+        my $parentPID = $$;
+        my $grandChild = fork();
+        croak("Can't fork #2: $!\n") unless defined $grandChild;
+        if ($grandChild == 0) {
+            # update pid in table
+            my $pid = $$;
+            logger($self->LOGFH, $self->VERBOSE, "#######################################\n");
+            logger($self->LOGFH, $self->VERBOSE, "## job name: $self->JOBNAME child pid: $pid\n");
+            logger($self->LOGFH, $self->VERBOSE, "#######################################\n");
+            my $dbh = $self->dbh;
+            my $sth = $dbh->prepare("UPDATE $controlTable SET pid = ? WHERE name = ?");
+            $sth->execute($pid, $self->JOBNAME);
+            # run the command
+            my $startTime = getTimeStamp();
+            my @t0 = [Time::HiRes::gettimeofday]->@*;
+            $self->updateStatus($self->JOBNAME, 'running', '', $startTime, '', '');
+            system($self->CMD);
+            my $rc = $? >> 8;
+            my @t1 = [Time::HiRes::gettimeofday]->@*;
+            my $endTime = getTimeStamp();
+            my $elapsedTime = sprintf("%.6f", Time::HiRes::tv_interval(\@t0, \@t1));
+            if ($rc != 0) {
+                logger($self->LOGFH, $self->VERBOSE, "Error with $self->JOBNAME RC=$rc\n");
+            }
+            my $jobStatus = $rc == 0 ? 'complete' : 'failed';
+            $self->updateStatus($self->JOBNAME, $jobStatus, $rc, $startTime, $endTime, $elapsedTime);
+            exit $rc;
+        } else {
+            exit 0;
+        }
+    }
+    waitpid($child, 0);
 }
 
 1;
-
