@@ -288,16 +288,15 @@ sub new {
 	my $retval = bless \%args, $class;
 
 	$retval->{insert}(
-		$retval,
-		$retval->{JOBNAME},    #job name
-		$$,                    #pid
+		$retval
+		, $retval->{JOBNAME}   #job name
+		, $$                   #pid
 		, 'running'            #status
 		, 'NA'                 #exit code
 		, ''                   #start time
 		, ''                   #end time
 		, ''                   #elapsed time
-		, $retval->{CMD},      #command
-
+		, $retval->{CMD}       #command
 	);
 	return $retval;
 }
